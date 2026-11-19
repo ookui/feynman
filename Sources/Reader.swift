@@ -41,7 +41,7 @@ struct Reader: NSViewRepresentable {
         let bridge = context.coordinator
         let scroll = bridge.data?.file == path ? bridge.data!.scroll : UserDefaults.standard.double(forKey: bridge.scrollKey(path))
         let editable = allowsEditing && model.canEditNote(path)
-        let note = model.inlineNote.flatMap { editable && $0.path == path ? $0 : nil }
+        let note = model.inlineNote.flatMap { editable && $0.path == path && $0.mode != .title ? $0 : nil }
         let data = ReaderData(file: path, body: bodyText, marks: marks, focus: model.focus, extract: extract, scroll: scroll,
                               deletedIDs: model.snapshot.deletedIDs.sorted(), deletedPaths: model.snapshot.deletedPaths.sorted(), fragment: model.headingFragment, questionHistory: questionHistory,
                               sourceOffset: model.readingPosition.flatMap { $0.path == path ? $0.offset : nil },
@@ -149,14 +149,14 @@ struct Reader: NSViewRepresentable {
             switch m["action"] as? String {
             case "edit":
                 guard data?.editable != false, model.canEditNote(path), let offset = m["offset"] as? Int else { return }
-                if let note = model.inlineNote, note.path == path {
+                if let note = model.inlineNote, note.path == path, note.mode != .title {
                     message.webView?.callAsyncJavaScript("if (state?.editID === id && !activeBlock) openBlockAt(offset, y)",
                         arguments: ["id": note.id.uuidString, "offset": offset, "y": m["y"] ?? NSNull()],
                         in: nil, in: .page, completionHandler: nil)
                     return
                 }
                 guard (try? model.text(path)).map({ Document($0).body }) == data?.body else { model.refresh(); return }
-                model.beginInlineNote(path, offset: offset, editsMetadata: false)
+                model.beginInlineNote(path, offset: offset, mode: .paragraph)
             case "change", "endParagraph":
                 guard data?.editable != false, model.canEditNote(path), let note = model.inlineNote, note.path == path, m["id"] as? String == note.id.uuidString else { return }
                 if let start = m["start"] as? Int, let length = m["length"] as? Int, let value = m["value"] as? String {
@@ -167,7 +167,7 @@ struct Reader: NSViewRepresentable {
                     else { model.scheduleNoteSave(note) }
                 }
                 if let caret = m["caret"] as? Int { note.caret = caret }
-                if m["action"] as? String == "endParagraph", !note.editsMetadata || m["done"] as? Bool == true {
+                if m["action"] as? String == "endParagraph", note.mode == .paragraph || m["done"] as? Bool == true {
                     model.finishInlineNote()
                 }
             case "extract":

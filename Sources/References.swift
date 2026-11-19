@@ -6,12 +6,6 @@ struct EntryActions: View {
     @ObservedObject var m: Workspace
     let entry: Entry
     var body: some View {
-        if entry.kind != .references {
-            Button("编辑…") {
-                if m.place != .entry(entry.id) { m.go(.entry(entry.id)) }
-                if m.place == .entry(entry.id) { m.beginInlineNote(entry.path) }
-            }
-        }
         Button("关联条目…") { m.dialog = .relate(entry) }
         if entry.kind == .references { ReportLinksMenu(m: m, entry: entry) }
         Button("合并到其他条目…") { m.dialog = .merge(entry) }

@@ -34,9 +34,47 @@ import WebKit
         func check(_ result: Bool, _ reason: String) throws {
             guard result else { throw Failure(reason) }
         }
+        var titleQuestion = Entry(kind: .questions, title: "问题可以改名吗？", body: "问题正文。")
+        titleQuestion.links = [entry.id]
+        try m.store(titleQuestion)
+        m.go(.entry(titleQuestion.id))
+        try await until("改名测试问题未加载") {
+            guard let reader = find(WKWebView.self, in: window.contentView) else { return false }
+            return (try? await reader.evaluateJavaScript("article.querySelector('p')?.textContent === '问题正文。'") as? Bool) == true
+        }
+        func clickQuestionTitle() async throws {
+            let view = window.contentView!
+            let point = view.convert(NSPoint(x:55, y:view.isFlipped ? 38 : view.bounds.height-38), to:nil)
+            for type in [NSEvent.EventType.leftMouseDown,.leftMouseUp] {
+                let event = NSEvent.mouseEvent(with:type,location:point,modifierFlags:[],
+                    timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,context:nil,
+                    eventNumber:1,clickCount:1,pressure:type == .leftMouseDown ? 1 : 0)!
+                window.sendEvent(event)
+            }
+            try await until("单击标题后输入焦点未进入标题") { m.inlineNote?.mode == .title && window.firstResponder is NSTextView }
+        }
+        try await clickQuestionTitle()
+        let titleWeb = find(WKWebView.self, in:window.contentView)!
+        try check(try await titleWeb.evaluateJavaScript("!activeBlock && !state.editID") as? Bool == true,"改名时展开了正文段落")
+        let titleInput = window.firstResponder as! NSTextView
+        titleInput.selectAll(nil)
+        titleInput.insertText("怎样验证这个问题？",replacementRange:titleInput.selectedRange())
+        let enterTitle = NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],
+            timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,context:nil,
+            characters:"\r",charactersIgnoringModifiers:"\r",isARepeat:false,keyCode:36)!
+        window.sendEvent(enterTitle)
+        try await until("回车未保存问题标题") { m.inlineNote == nil && !(window.firstResponder is NSTextView) && m.snapshot.resolve(titleQuestion.id)?.title == "怎样验证这个问题？" }
+        try await clickQuestionTitle()
+        let nextInput = window.firstResponder as! NSTextView
+        nextInput.selectAll(nil)
+        nextInput.insertText("更新后的关键问题",replacementRange:nextInput.selectedRange())
+        m.go(.entry(entry.id))
+        let savedTitle=try Files.scan(project.url).resolve(titleQuestion.id)
+        try check(savedTitle?.title=="更新后的关键问题" && savedTitle?.body==titleQuestion.body && savedTitle?.links==titleQuestion.links,
+                  "切页时改名未保存或改变了正文与关联")
         try await until("正文未渲染") {
             guard let web = find(WKWebView.self, in: window.contentView) else { return false }
-            return (try? await web.evaluateJavaScript("article.querySelectorAll('p').length===2") as? Bool) == true
+            return (try? await web.evaluateJavaScript("article.querySelector('h2')?.textContent==='阅读' && article.querySelectorAll('p').length===2") as? Bool) == true
         }
         let web = find(WKWebView.self, in: window.contentView)!
         _ = try await web.evaluateJavaScript("""
@@ -49,7 +87,7 @@ import WebKit
         try await until("单击未在段落原位显示源码") {
             try await jsBool("activeBlock?.field.value === '点击*这一段*。' && !!article.querySelector('p strong') && !!article.querySelector('h2')")
         }
-        try check(m.dialog == nil && m.inlineNote?.editsMetadata == false, "单击进入了整页编辑")
+        try check(m.dialog == nil && m.inlineNote?.mode == .paragraph, "单击进入了整页编辑")
         _ = try await web.evaluateJavaScript("""
           (() => {
             const f=activeBlock.field;
@@ -236,7 +274,7 @@ import WebKit
         try Files.save(project.url.appendingPathComponent("memo.md"), paragraphs, expected: try m.text("memo.md"))
         m.go(.doc("memo.md"))
         let seam = ("开头😀**粗体**" as NSString).length
-        m.beginInlineNote("memo.md", offset: seam + 2, editsMetadata: false)
+        m.beginInlineNote("memo.md", offset: seam + 2, mode: .paragraph)
         try await until("未展开第二段") {
             guard let view = find(WKWebView.self, in: window.contentView) else { return false }
             return (try? await view.evaluateJavaScript("activeBlock?.field.value === '第二段'") as? Bool) == true
@@ -624,32 +662,43 @@ import WebKit
             }
         }
         let initialFrame=zoomWindow.frame
-        for nativeTitleBar in [false,true] {
-            func doubleClickTopBar() {
-                zoomWindow.contentView?.layoutSubtreeIfNeeded()
-                let point = nativeTitleBar
-                    ? NSPoint(x:zoomWindow.frame.width/2, y:(zoomWindow.frame.height+zoomWindow.contentLayoutRect.maxY)/2)
-                    : surface.convert(NSPoint(x:surface.bounds.midX,y:surface.bounds.midY),to:nil)
-                click(point,count:2)
-            }
-            doubleClickTopBar()
-            try await until("双击顶部栏未放大窗口，原生标题栏 \(nativeTitleBar)") { zoomWindow.frame.width > initialFrame.width }
-            doubleClickTopBar()
-            try await until("再次双击顶部栏未还原，原生标题栏 \(nativeTitleBar)") { zoomWindow.frame.equalTo(initialFrame) }
-        }
-        try await until("未找到页面标题行") { find(WindowTitleSurface.PageTitle.self,in:zoomWindow.contentView) != nil }
-        let pageTitle=find(WindowTitleSurface.PageTitle.self,in:zoomWindow.contentView)!
-        func doubleClickPageTitle() {
+        func doubleClickTopBar() {
             zoomWindow.contentView?.layoutSubtreeIfNeeded()
-            click(pageTitle.convert(NSPoint(x:pageTitle.bounds.midX,y:pageTitle.bounds.midY),to:nil),count:2)
+            click(surface.convert(NSPoint(x:surface.bounds.midX,y:surface.bounds.midY),to:nil),count:2)
         }
-        doubleClickPageTitle()
-        try await until("页面标题行双击未放大") { zoomWindow.frame.width > initialFrame.width }
-        doubleClickPageTitle()
-        try await until("页面标题行双击未还原") { zoomWindow.frame.equalTo(initialFrame) }
+        func checkContentClicks() async throws {
+            guard let reader=find(WKWebView.self,in:zoomWindow.contentView) else { throw Failure("未找到正文") }
+            let bar=surface.convert(surface.bounds,to:nil)
+            let points=[
+                NSPoint(x:reader.convert(.zero,to:nil).x+85,y:bar.minY-35), // Page heading
+                reader.convert(NSPoint(x:reader.bounds.midX,y:reader.bounds.midY),to:nil),
+                NSPoint(x:70,y:bar.midY) // Sidebar branding
+            ]
+            for point in points {
+                let frame=zoomWindow.frame
+                click(point,count:2)
+                try await Task.sleep(for:.milliseconds(120))
+                try check(zoomWindow.frame.equalTo(frame),"页面内容或侧栏双击触发了窗口缩放")
+            }
+        }
+        try await checkContentClicks()
+        doubleClickTopBar()
+        try await until("顶部栏未放大窗口") { zoomWindow.frame.width > initialFrame.width }
+        try await checkContentClicks()
+        doubleClickTopBar()
+        try await until("顶部栏未恢复窗口原来的大小和位置") { zoomWindow.frame.equalTo(initialFrame) }
+        func doubleClickNativeTitle() {
+            let y=(zoomWindow.frame.height+zoomWindow.contentLayoutRect.maxY)/2
+            click(NSPoint(x:zoomWindow.frame.width/2,y:y),count:2)
+        }
+        doubleClickNativeTitle()
+        try await until("窗口最上沿双击未放大") { zoomWindow.frame.width > initialFrame.width }
+        doubleClickNativeTitle()
+        try await until("窗口最上沿双击未还原") { zoomWindow.frame.equalTo(initialFrame) }
         // A regular click on the sidebar control in the same row must still toggle the sidebar.
         let originalWidth=surface.bounds.width
-        click(surface.convert(NSPoint(x:28,y:surface.bounds.midY),to:nil),count:1)
+        let dividerX = find(WKWebView.self,in:zoomWindow.contentView)!.convert(.zero,to:nil).x
+        click(NSPoint(x:dividerX+28,y:surface.convert(surface.bounds,to:nil).midY),count:1)
         try await until("顶部栏遮住了切换大纲按钮") { surface.bounds.width > originalWidth+100 }
         zoomWindow.orderOut(nil)
         print("通过：跨段剪切、富文本粘贴替换、快速输入及侧栏重开状态")

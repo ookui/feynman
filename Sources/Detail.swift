@@ -94,7 +94,7 @@ struct ProjectDetail: View {
     private func entryHeading(_ e: Entry) -> some View {
         let header = PageHeading(title: e.title, category: .kind(e.kind), metadata: e.origin,
                                  status: e.kind == .questions ? QuestionStatusButton(m: m, question: e) : nil,
-                                 editing: m.inlineNote.flatMap { $0.path == e.path && $0.editsMetadata ? $0 : nil }) {
+                                 editableTitle: EntryPageTitle(model: m, entry: e)) {
             PageActions {
                 if e.kind == .questions {
                     Button("继续研究此问题") { m.launch(.question, context: e.path) }

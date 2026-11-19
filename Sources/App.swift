@@ -112,6 +112,7 @@ struct MainView: View {
                     }
                     Text(model.project?.info.title ?? "项目空间").lineLimit(1)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                        .overlay(WindowTitleSurface())
                     if let p = model.project {
                         Button { NSWorkspace.shared.activateFileViewerSelecting([p.url]) } label: { Image(systemName:"folder") }.help("在 Finder 中显示项目")
                         if let recent = model.consoles.last(where: { $0.project.id == p.id }) {
@@ -121,7 +122,6 @@ struct MainView: View {
                     }
                     Button { model.dialog = .settings } label: { Image(systemName:"gearshape") }.help("本机设置")
                 }.buttonStyle(.plain).foregroundStyle(leaf).padding(.horizontal,20).frame(height:48)
-                 .background(WindowTitleSurface())
 
                 Divider()
                 VSplitView {
@@ -192,25 +192,30 @@ struct MainView: View {
         }
     }
 }
-// The toolbar handles its empty space. AppKit owns the separate title strip above it.
+// Only the navigation title and the native title strip above the fixed toolbar can zoom the window.
 struct WindowTitleSurface: NSViewRepresentable {
-    var pageTitle = false
-    class Surface: NSView {
-        private var titleMonitor: Any?
-
+    final class NavigationBar: NSView {
+        private var monitor: Any?
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if let titleMonitor { NSEvent.removeMonitor(titleMonitor); self.titleMonitor = nil }
-            guard let window else { return }
-            titleMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self, weak window] event in
-                guard let self, let window, event.window === window, event.clickCount == 2,
-                      window.attachedSheet == nil, !window.styleMask.contains(.fullScreen) else { return event }
-                if self is PageTitle {
-                    guard !self.isHiddenOrHasHiddenAncestor, self.visibleRect.contains(self.convert(event.locationInWindow, from: nil)) else { return event }
-                } else if event.locationInWindow.y < window.contentLayoutRect.maxY { return event }
-                for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-                    if let button = window.standardWindowButton(kind), !button.isHidden,
-                       button.bounds.contains(button.convert(event.locationInWindow, from: nil)) { return event }
+            if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                guard let self, let window = self.window, event.window === window,
+                      event.clickCount == 2, window.attachedSheet == nil,
+                      !window.styleMask.contains(.fullScreen), !self.isHiddenOrHasHiddenAncestor else { return event }
+                let title = self.convert(self.visibleRect.intersection(self.bounds), to: nil)
+                guard !title.isEmpty else { return event }
+                let point = event.locationInWindow
+                if !title.contains(point) {
+                    // fullSizeContentView can extend behind the native title bar. The
+                    // toolbar's top edge also bounds the band in window coordinates.
+                    guard point.y >= max(title.maxY, window.contentLayoutRect.maxY),
+                          point.y < window.frame.height else { return event }
+                    for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                        if let button = window.standardWindowButton(kind), !button.isHidden,
+                           button.bounds.contains(button.convert(point, from: nil)) { return event }
+                    }
                 }
                 window.performZoom(nil)
                 return nil
@@ -218,18 +223,13 @@ struct WindowTitleSurface: NSViewRepresentable {
         }
         override var mouseDownCanMoveWindow: Bool { false }
         override func mouseDown(with event: NSEvent) {
-            guard let window else { return }
+            guard let window, visibleRect.contains(convert(event.locationInWindow, from: nil)) else { return }
             if event.clickCount == 2 { window.performZoom(nil) }
             else { window.performDrag(with: event) }
         }
     }
-    // Text selection and scrolling still receive the original single click and drag.
-    final class NavigationBar: Surface {}
-    final class PageTitle: Surface {
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    }
-    func makeNSView(context: Context) -> Surface { pageTitle ? PageTitle() : NavigationBar() }
-    func updateNSView(_ view: Surface, context: Context) {}
+    func makeNSView(context: Context) -> NavigationBar { NavigationBar() }
+    func updateNSView(_ view: NavigationBar, context: Context) {}
 }
 private struct PaneDivider: View {
     let label: String
@@ -376,7 +376,7 @@ struct Sidebar: View {
                 }
             }.buttonStyle(SidebarLinkStyle())
         }
-        if m.expanded.contains("reports") { ForEach(m.snapshot.reports,id:\.self) { r in row(documentLabel(r),nil,.doc(r), hover: .report).padding(.leading,40).contextMenu { Button("编辑报告…") { m.editDoc(r) } } } }
+        if m.expanded.contains("reports") { ForEach(m.snapshot.reports,id:\.self) { r in row(documentLabel(r),nil,.doc(r), hover: .report).padding(.leading,40) } }
         ForEach(Kind.allCases) { k in
             let entries = m.snapshot.entries.filter { $0.kind == k }
             HStack(spacing:3) {
@@ -440,8 +440,6 @@ struct Sidebar: View {
         .contextMenu {
             if case .entry(let id) = item.target, let entry = m.snapshot.resolve(id) {
                 EntryActions(m: m, entry: entry)
-            } else if case .document(let path) = item.target, m.canEditNote(path) {
-                Button("编辑文档…") { m.editDoc(path) }
             }
         }
     }

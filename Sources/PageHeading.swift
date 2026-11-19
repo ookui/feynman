@@ -82,17 +82,16 @@ struct PageHeading<Content: View>: View {
     var metadata: String = ""
     var subtitle: String = ""
     var status: QuestionStatusButton? = nil
-    var editing: InlineNoteDraft? = nil
+    var editableTitle: EntryPageTitle? = nil
     @ViewBuilder var content: () -> Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
-            if let editing { InlineNoteTitle(draft: editing) }
+            if let editableTitle { editableTitle }
             else { Text(title).font(.system(size: 28, weight: .bold))
                 .foregroundStyle(ink).textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(WindowTitleSurface(pageTitle: true)) }
+                .frame(maxWidth: .infinity, alignment: .leading) }
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 16) {
                     tags.fixedSize()

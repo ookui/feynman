@@ -11,14 +11,15 @@ import AppKit
     var text: String
     @Published var title: String
     var caret: Int
-    let editsMetadata: Bool
+    enum Mode { case paragraph, title, document }
+    let mode: Mode
     var autosave: Task<Void, Never>?
     var cloudCopies: [CloudCopy]
     @Published var diskVersion: String?
     @Published var status = ""
 
     init(path: String, url: URL, project: ProjectAt, entry: Entry?, original: String?, append: String,
-         offset: Int, editsMetadata: Bool, cloudCopies: [CloudCopy]) {
+         offset: Int, mode: Mode, cloudCopies: [CloudCopy]) {
         self.path = path
         self.url = url
         self.project = project
@@ -29,15 +30,15 @@ import AppKit
         let body = Document(original ?? "").body
         text = append.isEmpty ? body : body + (body.isEmpty ? "" : "\n\n") + append + "\n"
         caret = append.isEmpty ? min(max(0, offset), (body as NSString).length) : (text as NSString).length
-        self.editsMetadata = editsMetadata
+        self.mode = mode
     }
     var needsReview: Bool { diskVersion != nil || !cloudCopies.isEmpty }
 }
 
 extension Workspace {
-    func beginInlineNote(_ path: String, offset: Int = 0, editsMetadata: Bool = true, append: String = "") {
+    func beginInlineNote(_ path: String, offset: Int = 0, mode: InlineNoteDraft.Mode = .document, append: String = "") {
         guard canEditNote(path) else { return }
-        if let current = inlineNote, current.path == path, current.editsMetadata == editsMetadata { return }
+        if let current = inlineNote, current.path == path, current.mode == mode { return }
         guard finishInlineNote(), let project else { return }
         attempt {
             let url = try documentURL(path)
@@ -50,7 +51,7 @@ extension Workspace {
                 CloudCopy(version: $0, content: try String(contentsOf: $0.url, encoding: .utf8))
             }
             inlineNote = InlineNoteDraft(path: path, url: url, project: project, entry: entry, original: original,
-                                        append: append, offset: offset, editsMetadata: editsMetadata, cloudCopies: copies)
+                                        append: append, offset: offset, mode: mode, cloudCopies: copies)
         }
     }
 
@@ -124,11 +125,41 @@ struct NoteBody: View {
     }
 }
 
-struct InlineNoteTitle: View {
+struct EntryPageTitle: View {
+    @ObservedObject var model: Workspace
+    let entry: Entry
+
+    var body: some View {
+        if let draft = model.inlineNote, draft.path == entry.path, draft.mode != .paragraph {
+            InlineNoteTitle(draft: draft, model: model).id(draft.id)
+        } else {
+            Button { model.beginInlineNote(entry.path, mode: .title) } label: {
+                Text(entry.title).font(.system(size: 28, weight: .bold)).foregroundStyle(ink)
+                    .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+            }.buttonStyle(.plain).help("点击修改标题")
+        }
+    }
+}
+
+private struct InlineNoteTitle: View {
     @ObservedObject var draft: InlineNoteDraft
+    let model: Workspace
+    @FocusState private var focused: Bool
+
+    private func finishTitle() {
+        if draft.mode == .title, model.inlineNote === draft { model.finishInlineNote() }
+    }
+
     var body: some View {
         TextField("标题", text: $draft.title, axis: .vertical)
             .font(.system(size: 28, weight: .bold)).textFieldStyle(.plain)
+            .focused($focused).focusedValue(\.editingNavigationKeys, true)
+            .task(id: draft.id) { if draft.mode == .title { focused = true } }
+            .onSubmit { finishTitle() }
+            .onChange(of: focused) { _, active in if !active { finishTitle() } }
+            .onExitCommand {
+                if draft.mode == .title, model.inlineNote === draft { model.inlineNote = nil }
+            }
     }
 }
 
@@ -147,7 +178,7 @@ private struct NoteEditingControls: View {
                     }.frame(maxHeight: 120)
                 }.padding(.horizontal)
             }
-            if draft.editsMetadata || draft.needsReview || !draft.status.isEmpty {
+            if draft.mode == .document || draft.needsReview || !draft.status.isEmpty {
                 HStack {
                     Text(draft.status.isEmpty ? (draft.needsReview ? "请核对同步版本" : "Markdown · 自动保存") : draft.status)
                         .font(.caption).foregroundStyle(.secondary)
@@ -159,7 +190,9 @@ private struct NoteEditingControls: View {
                         .keyboardShortcut("s")
                 }.padding(.horizontal, 18).padding(.vertical, 6)
             }
-        }.onChange(of: draft.title) { _, _ in m.scheduleNoteSave(draft) }
+        }.onChange(of: draft.title) { _, _ in
+            if draft.mode == .document { m.scheduleNoteSave(draft) }
+        }
     }
 }
 
