@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "edits",
+    "answer"
+  ],
+  "properties": {
+    "edits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "original",
+          "revised"
+        ],
+        "properties": {
+          "original": {
+            "type": "string"
+          },
+          "revised": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "answer": {
+      "type": "string"
+    }
+  }
+}
