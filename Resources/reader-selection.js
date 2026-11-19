@@ -188,6 +188,10 @@ document.addEventListener('keydown',event=>{
   if (event.isComposing || event.keyCode===229 || event.altKey) return;
   const range=selectedNoteRange();
   if (!range) return;
+  if (event.key==='Tab' && !event.metaKey && !event.ctrlKey && indentRenderedItems(range,event.shiftKey)) {
+    event.preventDefault();
+    return;
+  }
   const key=event.key.toLowerCase();
   if ((event.metaKey || event.ctrlKey) && ['x','v'].includes(key)) {
     rangeClipboard(event,key==='x' ? 'cut' : 'paste',range);

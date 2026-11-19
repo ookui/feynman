@@ -26,7 +26,11 @@ function applyBlockSplice(step, restore) {
   }
   send({action:'change', id:state.editID, start:step.start, length, value, caret});
   paint({...state,body},true);
-  openBlockAt(caret,null,restore ? step.cell : null);
+  if (step.imageIndex != null) {
+    const image = article.querySelectorAll('img')[step.imageIndex];
+    if (image && imageSources.get(image) === value) selectImage(image);
+  } else if (step.listBefore) restoreListSelection(restore ? step.listBefore : step.listAfter);
+  else openBlockAt(caret,null,restore ? step.cell : null);
   if (restore && step.cellUndo && activeBlock?.grid) activeBlock.cellUndo.push(...step.cellUndo);
   blockHistory.body = body;
 }
@@ -58,11 +62,18 @@ function removeTableBlock(edit, ordinal) {
 
 document.addEventListener('keydown', event => {
   if ((!event.metaKey && !event.ctrlKey) || event.altKey || event.key.toLowerCase()!=='z' ||
-      event.isComposing || !activeBlock || !state.editID || blockHistory.file!==file ||
-      !activeBlock.holder.contains(event.target)) return;
+      event.isComposing || !state.editID || blockHistory.file!==file) return;
   const restore=!event.shiftKey;
   const from=restore ? blockHistory.undo : blockHistory.redo;
-  if (!from.length || paragraphBody(activeBlock)!==blockHistory.body) return;
+  if (!from.length) return;
+  if (activeBlock) {
+    if (!activeBlock.holder.contains(event.target) || paragraphBody(activeBlock)!==blockHistory.body) return;
+  } else {
+    const step=from.at(-1);
+    const onImage=step.imageIndex!=null && selectedImage && imageLine.value===imageSources.get(selectedImage) &&
+      (event.target===imageLine || event.target===document.body || event.target===article);
+    if ((!onImage && !(step.listBefore && event.target===article)) || state.body!==blockHistory.body) return;
+  }
   event.preventDefault();
   event.stopPropagation();
   const step=from.pop();

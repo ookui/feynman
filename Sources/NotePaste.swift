@@ -127,6 +127,8 @@ enum NotePaste {
     }
     private static func link(_ name: String, _ href: String) -> String { "[" + label(name) + "](" + destination(href) + ")" }
 
+    static func imageMarkdown(_ name: String, _ href: String) -> String { "!" + link(name, href) }
+
     private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     private static let markup = try! NSRegularExpression(pattern: [
         #"(?ms)^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?(?:^ {0,3}\1[ \t]*(?:\n|$)|\z)"#,
@@ -291,6 +293,6 @@ enum NotePaste {
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
         let filename = UUID().uuidString.lowercased() + "." + ext
         try bytes.write(to: Files.child(folder, filename), options: .withoutOverwriting)
-        return "!" + link(name, "assets/" + filename)
+        return imageMarkdown(name, "assets/" + filename)
     }
 }

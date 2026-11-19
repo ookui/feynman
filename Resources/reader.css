@@ -23,6 +23,7 @@
 article{min-height:100vh;cursor:text}article img{max-width:100%;height:auto}.empty-note{margin-top:12px;color:#65738a;cursor:text}
 
 .editing-block{position:relative;list-style:none;min-width:0}
+li:has(> .list-head){list-style:none}
 .paragraph-source{display:block;width:100%;min-height:1.83em;padding:0;border:0;outline:0;resize:none;overflow:hidden;background:transparent;color:inherit;font:inherit;line-height:inherit;overflow-wrap:anywhere;caret-color:#385b87}
 
 .paragraph-measure{position:absolute;top:0;left:0;width:100%;visibility:hidden;pointer-events:none;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:inherit}
@@ -48,3 +49,10 @@ article table,.sima-table-block,.sima-table,.history-answer table{font-size:12px
 }
 
 article[contenteditable=true]{outline:0}
+
+article img{cursor:default}
+article img.selected-image{outline:2px solid #809ac3;outline-offset:1px}
+#image-source{position:fixed;z-index:2;box-sizing:border-box;height:20px;padding:1px 5px;border:0;
+  border-radius:3px;background:#dce8fa;color:#203954;font:12px/18px ui-monospace,monospace;text-overflow:ellipsis}
+
+#image-source:focus-visible{outline:2px solid #597ba9;background:#fff;text-overflow:clip}

@@ -155,10 +155,12 @@ function sanitize(html) {
   const allowed = new Set('P BR HR H1 H2 H3 H4 H5 H6 UL OL LI STRONG EM B I S DEL CODE PRE BLOCKQUOTE TABLE THEAD TBODY TR TH TD A IMG SUP SUB'.split(' '));
   for (const el of Array.from(template.content.querySelectorAll('*'))) {
     if (!allowed.has(el.tagName)) { el.replaceWith(document.createTextNode(el.textContent)); continue; }
+    const imageRaw = el.tagName === 'IMG' && (el.getAttribute('data-image-markdown') || el.outerHTML);
     const href = el.getAttribute('href'), alt = el.getAttribute('alt'), src = el.getAttribute('src');
     for (const attr of [...el.attributes]) el.removeAttribute(attr.name);
     if (el.tagName === 'A' && href) el.setAttribute('href', href);
     if (el.tagName === 'IMG') {
+      imageSources.set(el, imageRaw);
       if (alt) el.alt = alt;
       if (src && /^https?:\/\//i.test(src)) el.src = src;
       else if (src && !/^(?:[a-z][\w+.-]*:|\/)/i.test(src)) {
@@ -300,23 +302,13 @@ function paint(data, keepScroll = false) {
             parts.forEach((part, i) => sourceBlocks.set(el.children[i], {start:start+part.index, end:start+part.index+part[0].length}));
           }
         }
-        if (token.type === 'list') {
-          let next = start;
-          [...el.children].forEach((li, i) => {
-            const raw = token.items[i]?.raw;
-            const at = raw && data.body.indexOf(raw, next);
-            if (raw && at >= next && at + raw.length <= cursor) {
-              const children=token.items[i].tokens;
-              const inline=children.length===1 && children[0].type==='text' ? children[0].tokens : null;
-              sourceBlocks.set(li, {start:at, end:at + raw.replace(/\n+$/, '').length, inline});
-              next = at + raw.length;
-            }
-          });
-        }
+        if (token.type === 'list') mapListItems(el,token,token.raw,start);
       }
     }
     content.append(block);
   }
+  const previousImage = same && imageBookmark();
+  if (same) preserveImageSizes(content);
   article.replaceChildren(content);
   if (!article.childElementCount && data.editable !== false) {
     const prompt = document.createElement('button');
@@ -327,6 +319,7 @@ function paint(data, keepScroll = false) {
     article.append(prompt);
   }
   if (Array.isArray(data.questionHistory)) renderHistory(data.questionHistory, historyExpanded, openTurns);
+  if (!previousImage || !restoreImageSelection(previousImage,true)) clearImageSelection();
   removeDeletedLinks(article,data);
   index = documentIndex(article);
   const hits = data.marks.map(m => ({...m, pos:locate(index,m.anchor)})).filter(m => m.pos);
@@ -381,7 +374,7 @@ function paint(data, keepScroll = false) {
     const span = sourceBlocks.get(el);
     return span && span.end >= data.sourceOffset;
   });
-  if (keepScroll) scrollTo(0,lastY || 0);
+  if (keepScroll || selectedImage) scrollTo(0,lastY || 0);
   else if (resumed) resumed.scrollIntoView({block:'nearest'});
   else if (heading) heading.scrollIntoView({block:'start'});
   else if (highlight) highlight.scrollIntoView({block:'center'});
@@ -417,8 +410,15 @@ function blockCaret(edit) {
   return edit.grid ? edit.start+edit.caret : fieldStart(edit)+edit.field.selectionEnd;
 }
 
-function mappedBlocks() {
-  return [...article.querySelectorAll('*')].filter(el => sourceBlocks.has(el));
+function editableSpan(el) {
+  return listParts.get(el) ?? sourceBlocks.get(el) ?? listItems.get(el);
+}
+function mappedBlocks(includeNested = false) {
+  return [...article.querySelectorAll('*')].filter(el => {
+    if (!includeNested) return sourceBlocks.has(el);
+    if (listItems.get(el)?.sublistStarts || (el.matches('ol,ul') && listItems.has(el.firstElementChild))) return false;
+    return !!editableSpan(el);
+  });
 }
 function paragraphBody(edit) {
   return state.body.slice(0, edit.start) + blockValue(edit) + state.body.slice(edit.end);
@@ -451,6 +451,10 @@ function openBlockAt(offset, targetY = null, target = null) {
   if (state?.editable === false) return;
   target ??= pendingClick?.file===file && pendingClick.offset===offset ? pendingClick.target : null;
   pendingClick=null;
+  if (target?.cancelForImage) {
+    send({action:'endParagraph',id:state.editID,caret:offset});
+    return;
+  }
   if (target?.deletion && target.body===state.body && state.editID) {
     getSelection().removeAllRanges();
     article.removeAttribute('contenteditable');
@@ -458,10 +462,9 @@ function openBlockAt(offset, targetY = null, target = null) {
     return;
   }
   const afterTable=target?.afterTable===true;
-  const blocks = mappedBlocks();
   // The innermost match selects a single list item, even when its parent covers the same offset.
-  let el = blocks.filter(node => {
-    const {start,end} = sourceBlocks.get(node);
+  let el = mappedBlocks(true).filter(node => {
+    const {start,end} = editableSpan(node);
     return start <= offset && offset <= end;
   }).pop();
   if (el && tableSources.has(el)) {
@@ -471,7 +474,7 @@ function openBlockAt(offset, targetY = null, target = null) {
   }
   if (afterTable && !el?.matches('.after-table-line')) return;
   const synthetic = !el;
-  let span = afterTable ? {start:offset,end:offset} : el && sourceBlocks.get(el);
+  let span = afterTable ? {start:offset,end:offset} : el && editableSpan(el);
   if (!el) {
     el = document.createElement('div');
     const next = [...article.children].find(node => sourceBlocks.get(node)?.start > offset || node.matches('details'));
@@ -493,7 +496,10 @@ function openBlockAt(offset, targetY = null, target = null) {
     holder.style.letterSpacing = style.letterSpacing;
   }
   holder.append(field);
-  const edit = {field, holder, original:el, synthetic, ...span, tag:el.tagName, sent:field.value, composing:false};
+  const part=listParts.get(el);
+  if (part?.leading) holder.classList.add('list-head');
+  const edit = {field, holder, original:el, synthetic, start:span.start, end:span.end,
+    tag:part?.leading ? 'LI' : el.tagName, sent:field.value, composing:false};
   if (afterTable) {
     // Keep the insertion line out of the note until it has content. Existing line
     // endings stay attached to the following block (or to the end of the file).
@@ -535,7 +541,11 @@ function openBlockAt(offset, targetY = null, target = null) {
     });
   };
   field.oncompositionend = () => flushField(edit);
-  field.onblur = () => { if (!pointerDown && activeBlock === edit) closeBlock(); };
+  // WebKit can move focus while undo restores a paragraph separator. Let the
+  // input handler finish rebuilding and focusing the restored block first.
+  field.onblur = () => setTimeout(() => {
+    if (!pointerDown && activeBlock === edit && !editorHasFocus(edit)) closeBlock();
+  },0);
   field.onkeydown = event => handleBlockKey(event, edit);
   field.onpaste = event => {
     if (!event.isTrusted || event.defaultPrevented) return;
@@ -591,11 +601,11 @@ function requestBlock(offset, y = null, target = null) {
 }
 
 function moveToNeighbor(edit, direction, x = null) {
-  const back = direction < 0, blocks = mappedBlocks();
-  const next = back ? blocks.filter(el => sourceBlocks.get(el).end < edit.start || (edit.afterTable && sourceBlocks.get(el).end===edit.start)).at(-1)
-                    : blocks.find(el => sourceBlocks.get(el).start > edit.end);
+  const back = direction < 0, blocks = mappedBlocks(true);
+  const next = back ? blocks.filter(el => editableSpan(el).end < edit.start || (edit.afterTable && editableSpan(el).end===edit.start)).at(-1)
+                    : blocks.find(el => editableSpan(el).start > edit.end);
   if (!next) return false;
-  const span = sourceBlocks.get(next);
+  const span = editableSpan(next);
   let cell = null;
   if (x !== null && tableSources.has(next)) {
     const rows = next.querySelector('table').rows;
@@ -614,12 +624,12 @@ function moveToNeighbor(edit, direction, x = null) {
 
 function joinParagraph(edit, back) {
   if (edit.afterTable && (back || !edit.field.value)) return false;
-  const blocks = mappedBlocks();
-  const adjacent = back ? blocks.filter(node => sourceBlocks.get(node).end < edit.start).at(-1)
-                        : blocks.find(node => sourceBlocks.get(node).start > edit.end);
+  const blocks = mappedBlocks(true);
+  const adjacent = back ? blocks.filter(node => editableSpan(node).end < edit.start).at(-1)
+                        : blocks.find(node => editableSpan(node).start > edit.end);
   // Keep structural blocks (in particular a table's last cell and code fences) intact.
   if (!adjacent || tableSources.has(adjacent) || adjacent.matches('pre,hr') || edit.tag === 'PRE') return false;
-  const neighbor = sourceBlocks.get(adjacent);
+  const neighbor = editableSpan(adjacent);
   const body = paragraphBody(edit);
   const valueEnd = fieldStart(edit) + edit.field.value.length;
   const start = back ? neighbor.end : valueEnd;
@@ -651,6 +661,11 @@ function handleBlockKey(event, edit) {
   }
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   const marker = edit.tag === 'LI' && /^([ \t]*)([-*+]|(\d+)([.)]))([ \t]+)(?:\[[xX ]\] )?/.exec(field.value);
+  if (key === 'Tab' && (edit.tag==='LI' || listParts.has(edit.original) || listMarker.test(field.value))) {
+    event.preventDefault();
+    indentEditingItem(edit,event.shiftKey);
+    return;
+  }
   if (key === 'Enter' && !event.shiftKey && (marker || /^(P|H[1-6]|BUTTON|DIV)$/.test(edit.tag))) {
     // Insert the separator into the real Markdown before handing the caret to the new paragraph.
     event.preventDefault();
@@ -727,10 +742,10 @@ article.addEventListener('click', event => {
   }
   if (state?.editable === false || event.detail > 1 || event.target.closest('button,details,mark') || !getSelection().isCollapsed) return;
   let block = event.target;
-  while (block !== article && !sourceBlocks.has(block)) block = block.parentElement;
+  while (block !== article && !editableSpan(block)) block = block.parentElement;
   const line=tableLineInGap(event);
   if (line) { line.click(); return; }
-  const span = sourceBlocks.get(block);
+  const span = editableSpan(block);
   if (!span) { if (activeBlock) closeBlock(); return; }
   const td = event.target.closest('td,th');
   let cell = null;

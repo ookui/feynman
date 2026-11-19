@@ -50,6 +50,7 @@ struct Reader: NSViewRepresentable {
         if bridge.data != data { bridge.data = data; bridge.render(web) }
     }
     static func dismantleNSView(_ web: WKWebView, coordinator: Bridge) {
+        coordinator.imagePreview?.close()
         let controller = web.configuration.userContentController
         controller.removeScriptMessageHandler(forName: "selectionClipboard", contentWorld: .page)
         controller.removeScriptMessageHandler(forName: "reader")
@@ -58,6 +59,7 @@ struct Reader: NSViewRepresentable {
     }
     @MainActor final class Bridge: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKScriptMessageHandlerWithReply, WKURLSchemeHandler {
         let model: Workspace; var data: ReaderData?; var ready = false
+        var imagePreview: ReaderImagePanel?
         init(_ model: Workspace) { self.model = model }
         @objc func openItem(_ sender: NSMenuItem) {
             if let id = sender.representedObject as? String { model.go(.entry(id)) }
@@ -68,21 +70,26 @@ struct Reader: NSViewRepresentable {
             guard ready, let data, let raw = try? json(data) else { return }
             web.evaluateJavaScript("render(" + raw + ")") { _, e in if let e { self.model.error = e.localizedDescription } }
         }
+        func localImage(_ request: URL) throws -> (URL, String) {
+            guard let path = data?.file, request.scheme == "feynman-image", request.host == "local",
+                  let parts = URLComponents(url: request, resolvingAgainstBaseURL: false)?.queryItems,
+                  parts.first(where: { $0.name == "file" })?.value == path,
+                  let relative = parts.first(where: { $0.name == "src" })?.value?.removingPercentEncoding,
+                  !relative.hasPrefix("/"), URL(string: relative)?.scheme == nil else { throw Failure("图片路径无效。") }
+            let directory = try model.documentURL(path).deletingLastPathComponent()
+            let image = directory.appendingPathComponent(relative).standardizedFileURL.resolvingSymlinksInPath()
+            let key = try model.documentKey(for: image)
+            if key.hasPrefix("lakehouse:"), !path.hasPrefix("lakehouse:") { throw Failure("图片超出工作目录。") }
+            guard let type = UTType(filenameExtension: image.pathExtension), type.conforms(to: .image),
+                  let source = CGImageSourceCreateWithURL(image as CFURL, nil),
+                  let identifier = CGImageSourceGetType(source) as String?,
+                  let mime = UTType(identifier)?.preferredMIMEType, mime != "image/svg+xml" else { throw Failure("图片格式无效。") }
+            return (image, mime)
+        }
         func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
             do {
-                guard let request = task.request.url, let path = data?.file,
-                      let parts = URLComponents(url: request, resolvingAgainstBaseURL: false)?.queryItems,
-                      parts.first(where: { $0.name == "file" })?.value == path,
-                      let relative = parts.first(where: { $0.name == "src" })?.value?.removingPercentEncoding,
-                      !relative.hasPrefix("/"), URL(string: relative)?.scheme == nil else { throw Failure("图片路径无效。") }
-                let directory = try model.documentURL(path).deletingLastPathComponent()
-                let image = directory.appendingPathComponent(relative).standardizedFileURL.resolvingSymlinksInPath()
-                let key = try model.documentKey(for: image)
-                if key.hasPrefix("lakehouse:"), !path.hasPrefix("lakehouse:") { throw Failure("图片超出工作目录。") }
-                guard let type = UTType(filenameExtension: image.pathExtension), type.conforms(to: .image),
-                      let source = CGImageSourceCreateWithURL(image as CFURL, nil),
-                      let identifier = CGImageSourceGetType(source) as String?,
-                      let mime = UTType(identifier)?.preferredMIMEType, mime != "image/svg+xml" else { throw Failure("图片格式无效。") }
+                guard let request = task.request.url else { throw Failure("图片路径无效。") }
+                let (image, mime) = try localImage(request)
                 let bytes = try Data(contentsOf: image, options: .mappedIfSafe)
                 task.didReceive(URLResponse(url: request, mimeType: mime, expectedContentLength: bytes.count, textEncodingName: nil))
                 task.didReceive(bytes)
@@ -147,6 +154,8 @@ struct Reader: NSViewRepresentable {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame, let m = message.body as? [String:Any], let path = m["file"] as? String, data?.file == path else { return }
             switch m["action"] as? String {
+            case "imageMenu", "previewImage":
+                if let web = message.webView { handleImageMessage(m, in: web) }
             case "edit":
                 guard data?.editable != false, model.canEditNote(path), let offset = m["offset"] as? Int else { return }
                 if let note = model.inlineNote, note.path == path, note.mode != .title {

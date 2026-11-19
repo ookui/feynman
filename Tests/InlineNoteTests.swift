@@ -138,6 +138,133 @@ import WebKit
             guard let reader = find(WKWebView.self, in: window.contentView) else { return false }
             return (try? await reader.evaluateJavaScript("article.querySelector('img')?.naturalWidth===4") as? Bool) == true
         }
+        _ = try await web.evaluateJavaScript("article.querySelector('img').click()")
+        try check(try await jsBool("!activeBlock && !imageLine.hidden && getComputedStyle(selectedImage).cursor==='default' && imageLine.value.startsWith('![图片](assets/') && imageSourceRange(selectedImage)?.start === state.body.indexOf(imageLine.value)"),
+                  "单击图片未正确显示原始引用，或误入段落编辑")
+        let bridge = web.navigationDelegate as! Reader.Bridge
+        let imageCenter = try await web.evaluateJavaScript("(() => { const r=selectedImage.getBoundingClientRect(); return [r.x+r.width/2,r.y+r.height/2] })()") as! [Double]
+        let imagePoint = web.convert(NSPoint(x:imageCenter[0],y:web.isFlipped ? imageCenter[1] : web.bounds.height-imageCenter[1]),to:nil)
+        for clicks in 1...2 {
+            for type in [NSEvent.EventType.leftMouseDown,.leftMouseUp] {
+                let event = NSEvent.mouseEvent(with:type,location:imagePoint,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+                    windowNumber:window.windowNumber,context:nil,eventNumber:clicks,clickCount:clicks,pressure:1)!
+                if type == .leftMouseDown { web.mouseDown(with:event) } else { web.mouseUp(with:event) }
+                try await Task.sleep(for:.milliseconds(20))
+            }
+        }
+        try await until("双击图片未打开前景预览") { bridge.imagePreview?.isVisible == true }
+        let panel = bridge.imagePreview!
+        try await until("小图原始大小或放大按钮错误") { find(NSButton.self,in:panel.contentView)?.toolTip == "放大" && find(PreviewImageScroll.self,in:panel.contentView)?.scale == 1 }
+        let escape = NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:0,windowNumber:panel.windowNumber,
+                                      context:nil,characters:"\u{1b}",charactersIgnoringModifiers:"\u{1b}",isARepeat:false,keyCode:53)!
+        panel.sendEvent(escape)
+        try await until("Esc 未关闭图片预览") { !panel.isVisible }
+        try check(try await jsBool("!!selectedImage && !activeBlock && !imageLine.hidden"),"退出预览后丢失图片选区")
+        // Exercise both wheel paths and hand dragging on a real, overflowing preview.
+        let large = NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:2000,pixelsHigh:1600,bitsPerSample:8,samplesPerPixel:4,
+                                     hasAlpha:true,isPlanar:false,colorSpaceName:.deviceRGB,bytesPerRow:0,bitsPerPixel:0)!
+        let largeURL = try m.documentURL(entry.path).deletingLastPathComponent().appendingPathComponent("大图.png")
+        try large.representation(using:.png,properties:[:])!.write(to:largeURL)
+        let previewURL = try await web.evaluateJavaScript("new URL('feynman-image://local/?'+new URLSearchParams({file,src:'大图.png'})).href") as! String
+        bridge.handleImageMessage(["action":"previewImage","src":previewURL],in:web)
+        let largePanel = bridge.imagePreview!
+        try await until("大图未以原始尺寸打开") {
+            find(PreviewImageScroll.self,in:largePanel.contentView)?.documentView?.frame.width == 2000
+        }
+        let viewport = find(PreviewImageScroll.self,in:largePanel.contentView)!
+        let canvas = viewport.documentView!
+        let zoomButton = find(NSButton.self,in:largePanel.contentView)!
+        try check(viewport.scale==1 && !viewport.offersZoomIn && zoomButton.toolTip=="缩小","大图没有自动切换到缩小")
+        zoomButton.performClick(nil)
+        try check(viewport.scale<1 && viewport.offersZoomIn && zoomButton.toolTip=="放大","适应窗口后放大按钮错误")
+        zoomButton.performClick(nil)
+        try check(viewport.scale==1,"放大按钮未返回原始大小")
+        let wheelPoint = viewport.convert(NSPoint(x:viewport.bounds.width/3,y:viewport.bounds.height/3),to:nil)
+        let wheelScreenPoint = largePanel.convertPoint(toScreen:wheelPoint)
+        func wheel(_ delta:Int32,command:Bool) {
+            let cg = CGEvent(scrollWheelEvent2Source:nil,units:.pixel,wheelCount:1,wheel1:delta,wheel2:0,wheel3:0)!
+            cg.flags = command ? .maskCommand : []
+            cg.location = CGPoint(x:wheelScreenPoint.x,y:NSScreen.screens[0].frame.maxY-wheelScreenPoint.y)
+            cg.setIntegerValueField(.mouseEventWindowUnderMousePointer,value:Int64(largePanel.windowNumber))
+            cg.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent,value:Int64(largePanel.windowNumber))
+            largePanel.sendEvent(NSEvent(cgEvent:cg)!)
+        }
+        let anchor = canvas.convert(wheelPoint,from:nil)
+        wheel(20,command:true)
+        let afterZoom = canvas.convert(wheelPoint,from:nil)
+        try check(hypot(anchor.x-afterZoom.x/viewport.scale,anchor.y-afterZoom.y/viewport.scale)<1.5,"缩放时鼠标指向的位置发生漂移")
+        try check(viewport.scale>1 && canvas.frame.width>2000,"⌘ 滚轮未放大图片")
+        wheel(-20,command:true)
+        try check(abs(viewport.scale-1)<0.001,"反向 ⌘ 滚轮未缩小图片")
+        let clip = viewport.contentView
+        clip.scroll(to:NSPoint(x:220,y:220))
+        viewport.reflectScrolledClipView(clip)
+        wheel(-40,command:false)
+        try await until("普通滚轮未滚动大图") { abs(clip.bounds.minY-220)>1 && abs(viewport.scale-1)<0.001 }
+        let beforeDrag = clip.bounds.origin, point = canvas.convert(NSPoint(x:clip.bounds.midX,y:clip.bounds.midY),to:nil)
+        func pointer(_ type:NSEvent.EventType,_ at:NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with:type,location:at,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+                windowNumber:largePanel.windowNumber,context:nil,eventNumber:1,clickCount:1,pressure:1)!
+        }
+        canvas.mouseDown(with:pointer(.leftMouseDown,point))
+        try check(NSCursor.current == .closedHand,"按住图片时没有切换为抓手")
+        let moved = NSPoint(x:point.x+35,y:point.y+22)
+        canvas.mouseDragged(with:pointer(.leftMouseDragged,moved))
+        canvas.mouseUp(with:pointer(.leftMouseUp,moved))
+        try check(abs(clip.bounds.minX-beforeDrag.x+35)<1 && abs(clip.bounds.minY-beforeDrag.y-22)<1 && abs(viewport.scale-1)<0.001,
+                  "拖动没有双向平移，或松开后误触缩放")
+        largePanel.close()
+        var menuOpened = false
+        let observer = NotificationCenter.default.addObserver(forName:NSMenu.didBeginTrackingNotification,object:nil,queue:.main) { notice in
+            guard let menu = notice.object as? NSMenu, let copy = menu.item(withTitle:"复制图片源码") else { return }
+            menuOpened = menu.item(withTitle:"剪切")?.isEnabled == true && menu.item(withTitle:"缩放预览")?.submenu != nil
+            menu.performActionForItem(at:menu.index(of:copy))
+            menu.cancelTracking()
+        }
+        _ = try await web.evaluateJavaScript("selectedImage.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2})); true")
+        try await until("图片右键菜单未显示或复制了错误内容") { menuOpened && board.string(forType:.string)?.hasPrefix("![图片](assets/") == true }
+        NotificationCenter.default.removeObserver(observer)
+        let originalImage = board.string(forType:.string)!
+        let alternate = NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:70,pixelsHigh:24,bitsPerSample:8,samplesPerPixel:4,hasAlpha:true,isPlanar:false,colorSpaceName:.deviceRGB,bytesPerRow:0,bitsPerPixel:0)!
+        let changedImage = try NotePaste.storeImage(alternate.representation(using:.png,properties:[:])!,name:"修改后的图注",note:m.documentURL(entry.path))
+        let above = String(repeating:"正文段落。\n\n",count:45) + "`" + originalImage + "` " + originalImage + " ["
+        let below = "](#另一个位置)\n\n" + String(repeating:"后续段落。\n\n",count:24) + "## 另一个位置"
+        let imageEntry = Entry(kind:.entities,title:"长文图片",body:above + originalImage + below)
+        try m.store(imageEntry)
+        m.go(.entry(imageEntry.id))
+        try await until("长文图片未加载") {
+            guard let reader = find(WKWebView.self,in:window.contentView) else { return false }
+            return (try? await reader.evaluateJavaScript("article.querySelector('a img')?.naturalWidth===4") as? Bool) == true
+        }
+        let longWeb = find(WKWebView.self,in:window.contentView)!
+        func clickInReader(_ selector: String) async throws {
+            let center = try await longWeb.callAsyncJavaScript("const r=document.querySelector(sel).getBoundingClientRect(); return [r.x+r.width/2,r.y+r.height/2]",
+                arguments:["sel":selector],in:nil,contentWorld:.page) as! [Double]
+            let point = longWeb.convert(NSPoint(x:center[0],y:longWeb.isFlipped ? center[1] : longWeb.bounds.height-center[1]),to:nil)
+            for type in [NSEvent.EventType.leftMouseDown,.leftMouseUp] {
+                let event = NSEvent.mouseEvent(with:type,location:point,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+                    windowNumber:window.windowNumber,context:nil,eventNumber:1,clickCount:1,pressure:1)!
+                if type == .leftMouseDown { longWeb.mouseDown(with:event) } else { longWeb.mouseUp(with:event) }
+                try await Task.sleep(for:.milliseconds(30))
+            }
+        }
+        _ = try await longWeb.evaluateJavaScript("article.querySelector('a img').scrollIntoView({block:'center'});window.imageScrollBefore=scrollY;")
+        try await clickInReader("article a img")
+        try await Task.sleep(for:.milliseconds(400))
+        try check(try await longWeb.evaluateJavaScript("imageScrollBefore>0 && Math.abs(scrollY-imageScrollBefore)<2 && selectedImage===article.querySelector('a img') && !imageLine.hidden && !imageLine.readOnly && !activeBlock") as? Bool == true,
+                  "长文单击图片后失去选区、滚动跳转或打开了段落源码")
+        try await clickInReader("#image-source")
+        _ = try await longWeb.callAsyncJavaScript("imageLine.select(); document.execCommand('insertText',false,value);",arguments:["value":changedImage],in:nil,contentWorld:.page)
+        try check(try await longWeb.evaluateJavaScript("document.activeElement===imageLine && selectedImage.alt==='图片'") as? Bool == true,"编辑图注时图片消失或输入框未获得焦点")
+        let enterImage = NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+            windowNumber:window.windowNumber,context:nil,characters:"\r",charactersIgnoringModifiers:"\r",isARepeat:false,keyCode:36)!
+        window.sendEvent(enterImage)
+        try await until("回车未原位更新图片说明和路径") {
+            try await longWeb.evaluateJavaScript("selectedImage===article.querySelector('a img') && selectedImage?.alt==='修改后的图注' && selectedImage.naturalWidth===70 && Math.abs(scrollY-imageScrollBefore)<2 && !activeBlock") as? Bool == true
+        }
+        try await until("图片修改未保存到正确的引用") { try m.text(imageEntry.path).map { Document($0).body == above + changedImage + below } == true }
+        try check(m.finishInlineNote(),"无法结束图片编辑")
+        print("通过：长文图片单击原位选中、编辑说明与路径、回车更新及保存重复引用中的指定图片")
         let fixture = "## 列表\n\n- 重复\n- 重复\n\n```swift\nlet n = 1\n```\n\n最后一段"
         try Files.save(project.url.appendingPathComponent("memo.md"), fixture, expected: try m.text("memo.md"))
         m.editDoc("memo.md")
@@ -158,7 +285,16 @@ import WebKit
             document.execCommand('insertText',false,'二');
             f.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true})); })()
           """)
-        try check(try await memoWeb.evaluateJavaScript("activeBlock.field.value.startsWith('```swift') && article.querySelectorAll('li')[1].textContent==='重复二'") as? Bool == true, "跨段键盘导航未恢复列表")
+        try check(try await memoWeb.evaluateJavaScript("activeBlock.field.value==='  - 重复二' && activeBlock.holder.parentElement.parentElement.matches('li') && activeBlock.field.selectionStart===activeBlock.field.value.length") as? Bool == true, "Tab 未缩进当前列表项或移动了光标")
+        _ = try await memoWeb.evaluateJavaScript("""
+            const sendListKey=(key,shiftKey=false)=>activeBlock.field.dispatchEvent(new KeyboardEvent('keydown',{key,shiftKey,bubbles:true,cancelable:true}));
+            sendListKey('Tab',true);
+            if (activeBlock.field.value!=='- 重复二') throw Error('Shift+Tab 未恢复列表层级');
+            sendListKey('Tab',true);
+            if (activeBlock.tag!=='P' || activeBlock.field.value!=='重复二' || activeBlock.field!==document.activeElement) throw Error('顶层未退出列表');
+            sendListKey('ArrowRight');
+            """)
+        try check(try await memoWeb.evaluateJavaScript("activeBlock.field.value.startsWith('```swift') && article.querySelectorAll('li').length===1 && [...article.querySelectorAll('p')].some(p=>p.textContent==='重复二')") as? Bool == true, "跨段键盘导航未恢复列表")
         _ = try await memoWeb.evaluateJavaScript("""
           (() => {
             activeBlock.field.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));
@@ -170,7 +306,93 @@ import WebKit
           """)
         try check(try await memoWeb.evaluateJavaScript("activeBlock.field.value === '新的段落' && [...article.querySelectorAll('p')].some(p=>p.textContent==='最后一段')") as? Bool == true, "新段落没有独立编辑")
         m.go(.entry(entry.id))
-        try check(try m.text("memo.md") == fixture.replacingOccurrences(of: "- 重复\n\n", with: "- 重复二\n\n") + "\n\n新的段落", "相同文本的条目被改错或分隔符丢失")
+        try check(try m.text("memo.md") == fixture.replacingOccurrences(of: "- 重复\n\n", with: "\n重复二\n\n") + "\n\n新的段落", "相同文本的条目被改错或分隔符丢失")
+        let outline="前文\n\n10. 父项\n11. **重复**\n12. 重复\n    - 子项\n      - 孙项\n    - 小结\n13. 末项\n\n后文"
+        let nested="前文\n\n10. 父项\n    11. **重复**\n    12. 重复\n        - 子项\n          - 孙项\n        - 小结\n13. 末项\n\n后文"
+        let outlineEntry=Entry(kind:.questions,title:"列表缩进",body:outline)
+        try m.store(outlineEntry)
+        m.go(.entry(outlineEntry.id))
+        try await until("未加载缩进测试笔记") {
+            guard let view=find(WKWebView.self,in:window.contentView) else { return false }
+            return (try? await view.evaluateJavaScript("article.querySelectorAll(':scope > ol > li').length===4") as? Bool)==true
+        }
+        let outlineWeb=find(WKWebView.self,in:window.contentView)!
+        window.makeFirstResponder(outlineWeb)
+        _ = try await outlineWeb.evaluateJavaScript("""
+            const rows=article.querySelectorAll(':scope > ol > li');
+            getSelection().setBaseAndExtent(rows[2].querySelector('div').firstChild,2,rows[1].querySelector('strong').firstChild,1); true
+            """)
+        func listKey(_ char:String,_ code:UInt16,_ modifiers:NSEvent.ModifierFlags=[]) async throws {
+            let key=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:modifiers,timestamp:ProcessInfo.processInfo.systemUptime,
+                windowNumber:window.windowNumber,context:nil,characters:char,charactersIgnoringModifiers:char,isARepeat:false,keyCode:code)!
+            window.sendEvent(key)
+            try await Task.sleep(for:.milliseconds(100))
+        }
+        try await listKey("\t",48)
+        try await until("两行没有一起缩进或子项位置错误") { m.snapshot.resolve(outlineEntry.id)?.body==nested }
+        try check(try await outlineWeb.evaluateJavaScript("article.querySelectorAll('ol > li > ol > li').length===2 && getSelection().focusNode.parentElement.tagName==='STRONG' && getSelection().focusOffset===1") as? Bool==true,"缩进后没有保留反向选区")
+        try await listKey("z",6,.command)
+        try await until("无法一次撤销多行缩进") { m.inlineNote?.text==outline }
+        try await listKey("z",6,[.command,.shift])
+        try await until("无法重做多行缩进") { m.inlineNote?.text==nested }
+        try await listKey("\u{19}",48,.shift)
+        try await until("两行没有一起减少缩进") { m.snapshot.resolve(outlineEntry.id)?.body==outline }
+        _ = try await outlineWeb.evaluateJavaScript("""
+            (() => {
+                const rows=article.querySelectorAll(':scope > ol > li');
+                getSelection().setBaseAndExtent(rows[0].firstChild,0,rows[1].querySelector('strong').firstChild,2);
+            })()
+            """)
+        try await listKey("\t",48)
+        let firstTwo=outline.replacingOccurrences(of:"\n10.",with:"\n  10.").replacingOccurrences(of:"\n11.",with:"\n  11.")
+        try await until("从列表首行开始选择时未缩进两行") { m.inlineNote?.text==firstTwo }
+        try await listKey("\u{19}",48,.shift)
+        try await until("列表首行和第二行没有同时恢复") { m.inlineNote?.text==outline }
+        func clickListText(_ selector: String) async throws {
+            let xy = try await outlineWeb.callAsyncJavaScript("""
+                const el=article.querySelector(selector);
+                el.scrollIntoView({block:'nearest'});
+                const r=el.getBoundingClientRect();
+                return [r.left+10,r.top+10];
+                """, arguments:["selector":selector], in:nil, contentWorld:.page) as! [Double]
+            let point=outlineWeb.convert(NSPoint(x:xy[0],y:outlineWeb.isFlipped ? xy[1] : outlineWeb.bounds.height-xy[1]),to:nil)
+            for type in [NSEvent.EventType.leftMouseDown,.leftMouseUp] {
+                let event=NSEvent.mouseEvent(with:type,location:point,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+                    windowNumber:window.windowNumber,context:nil,eventNumber:1,clickCount:1,pressure:1)!
+                if type == .leftMouseDown { outlineWeb.mouseDown(with:event) } else { outlineWeb.mouseUp(with:event) }
+            }
+        }
+        try await clickListText("ol > li:nth-child(3) > div")
+        try await until("点击父项展开了子列表或撑高输入框") {
+            (try? await outlineWeb.evaluateJavaScript("activeBlock?.field.value==='12. 重复' && activeBlock.field.clientHeight<parseFloat(getComputedStyle(activeBlock.field).lineHeight)*1.5 && article.querySelectorAll('li:nth-child(3) li').length===3") as? Bool)==true
+        }
+        try await clickListText("ol > li:nth-child(3) > ul > li:last-child")
+        try await until("从父项点击子项时没有切换到该行") {
+            (try? await outlineWeb.evaluateJavaScript("activeBlock?.field.value==='    - 小结'") as? Bool)==true
+        }
+        try await listKey("\u{19}",48,.shift)
+        let lifted=outline.replacingOccurrences(of:"    - 小结",with:"- 小结")
+        try await until("子项反缩进后没有回到顶层") { m.inlineNote?.text==lifted }
+        try await listKey("\u{19}",48,.shift)
+        let plain=lifted.replacingOccurrences(of:"- 小结\n",with:"\n小结\n\n")
+        try await until("再次反缩进没有得到独立普通段落") { m.snapshot.resolve(outlineEntry.id)?.body==plain }
+        try check(try await outlineWeb.evaluateJavaScript("activeBlock.field.value==='小结' && activeBlock.tag==='P' && !activeBlock.holder.closest('li')") as? Bool==true,"退出列表后光标没有留在普通段落")
+        try await listKey("z",6,.command)
+        try await until("退出列表无法撤销") { m.inlineNote?.text==lifted }
+        try await listKey("z",6,.command)
+        try await until("无法恢复三级列表") { m.inlineNote?.text==outline }
+        _ = try await outlineWeb.evaluateJavaScript("""
+            closeBlock(false,false);
+            const selectedRows=article.querySelectorAll(':scope > ol > li');
+            getSelection().setBaseAndExtent(selectedRows[1].querySelector('strong').firstChild,1,
+                selectedRows[2].querySelector('div').firstChild,2); true
+            """)
+        try await listKey("\u{19}",48,.shift)
+        let plainRows="前文\n\n10. 父项\n\n**重复**\n\n重复\n\n- 子项\n  - 孙项\n- 小结\n\n13. 末项\n\n后文"
+        try await until("多选顶层退出列表时没有保留子项、编号或强调") { m.inlineNote?.text==plainRows }
+        try check(try await outlineWeb.evaluateJavaScript("getSelection().anchorNode.parentElement.tagName==='STRONG' && getSelection().anchorOffset===1 && getSelection().focusNode.parentElement.tagName==='P' && getSelection().focusOffset===2") as? Bool==true,"多项退出列表时选区变化")
+        print("通过：单项和多项列表缩进、从首行开始的选区、子列表随动、反向选区以及一次撤销和重做")
+        m.go(.entry(entry.id))
         m.beginInlineNote(entry.path)
         m.inlineNote!.text += "草稿"
         var external = try Files.scan(project.url).resolve(entry.id)!
