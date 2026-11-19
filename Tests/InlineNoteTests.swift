@@ -311,6 +311,10 @@ import WebKit
         _ = try await readOnly.evaluateJavaScript("article.querySelector('p').click(); article.querySelector('td').click(); requestBlock(0); openBlockAt(0); true")
         try await Task.sleep(for: .milliseconds(180))
         try check(try await readOnly.evaluateJavaScript("!activeBlock && !article.querySelector('textarea, [contenteditable=true]')") as? Bool == true && m.inlineNote == nil, "引用资料进入编辑状态")
+        window.makeFirstResponder(readOnly)
+        _ = try await readOnly.evaluateJavaScript("getSelection().selectAllChildren(article); true")
+        try await pressDelete()
+        try check(m.inlineNote==nil, "只读资料的选区触发了删除")
         try check(try Data(contentsOf: source) == Data(raw.utf8), "只读资料的原文发生变化")
         let originalGrid = "| 名称 | 说明 | 数值 |\n| :--- | --- | ---: |\n| 重复 | A\\|B | **4** |\n| 重复 | [链接](https://example.org) |  |"
         let surrounding = "前文\n\n" + originalGrid + "\n\n后文"
@@ -433,9 +437,14 @@ import WebKit
         }
         let questionWeb=find(WKWebView.self,in:window.contentView)!
         func clickAfterTable() async throws {
+            _ = try await questionWeb.evaluateJavaScript("article.querySelector('.after-table-line').scrollIntoView({block:'nearest'})")
+            try await until("原生窗口与网页布局尚未对齐") {
+                guard let height = try await questionWeb.evaluateJavaScript("innerHeight") as? Double else { return false }
+                return abs(height - questionWeb.bounds.height) < 2
+            }
             let xy = try await questionWeb.evaluateJavaScript("""
-                (() => {const line=article.querySelector('.after-table-line'); line.scrollIntoView({block:'nearest'});
-                  const r=line.getBoundingClientRect(); return [r.left+16,r.top+r.height/2];})()
+                (()=>{const r=article.querySelector('.after-table-line').getBoundingClientRect();
+                      return [r.left+16,r.top+r.height/2];})()
                 """) as! [Double]
             let point=questionWeb.convert(NSPoint(x:xy[0], y:questionWeb.isFlipped ? xy[1] : questionWeb.bounds.height-xy[1]),to:nil)
             for type in [NSEvent.EventType.leftMouseDown,.leftMouseUp] {
@@ -466,6 +475,185 @@ import WebKit
             let changed=tableOnly.replacingOccurrences(of:"甲|乙",with:"甲更新|乙")
             return m.snapshot.resolve(question.id)?.body == changed+"\n\n中间段落\n\n表后分析"
         }
+        let listSection = "## 仍未解决与判别条件\n\n- 第一条\n- 重复\n- 重复\n- **最后一条**"
+        let rangeBody = "保留开头\n\n" + listSection + "\n\n保留结尾"
+        let rangeQuestion=Entry(kind:.questions,title:"跨段删除",body:rangeBody)
+        try m.store(rangeQuestion)
+        m.go(.entry(rangeQuestion.id))
+        try await until("跨段测试的问题未加载") {
+            guard let view=find(WKWebView.self,in:window.contentView) else { return false }
+            return (try? await view.evaluateJavaScript("article.querySelectorAll('li').length===4") as? Bool) == true
+        }
+        let rangeWeb=find(WKWebView.self,in:window.contentView)!
+        window.makeFirstResponder(rangeWeb)
+        _ = try await rangeWeb.evaluateJavaScript("""
+            const title=article.querySelector('h2').firstChild, tail=article.querySelector('li:last-child strong').firstChild;
+            getSelection().setBaseAndExtent(tail,tail.length,title,0); true
+            """)
+        try await pressDelete()
+        try await until("选中小标题和四个列表项后未能一次删除并保存") { m.snapshot.resolve(rangeQuestion.id)?.body=="保留开头\n\n保留结尾" }
+        try await shortcut("z",6)
+        try await until("撤销未还原标题、格式和重复列表项") { m.inlineNote?.text==rangeBody }
+        try await shortcut("z",6,shift:true)
+        try await until("整段删除不能重做") { m.inlineNote?.text=="保留开头\n\n保留结尾" }
+        _ = try await rangeWeb.evaluateJavaScript("activeBlock.field.blur(); true")
+        try await until("整段删除后未恢复阅读状态") { m.inlineNote==nil }
+        _ = try await rangeWeb.evaluateJavaScript("""
+            const ps=article.querySelectorAll(':scope > p');
+            getSelection().setBaseAndExtent(ps[0].firstChild,2,ps[1].firstChild,2); true
+            """)
+        try await pressDelete(forward:true)
+        try await until("跨段删除误删未选中的首尾文字") { m.inlineNote?.text=="保留结尾" }
+        try check(try await rangeWeb.evaluateJavaScript("!!article.querySelector('details.question-history')") as? Bool==true,"删除波及追问记录")
+        try await shortcut("z",6)
+        try await until("不能撤销跨段的部分文字删除") { m.inlineNote?.text=="保留开头\n\n保留结尾" }
+        // Start in the expanded first paragraph and drag to the end of the next
+        // paragraph through AppKit, just as a user would in the reader.
+        let dragPoints=try await rangeWeb.evaluateJavaScript("""
+            (()=>{ const f=activeBlock.field, p=article.querySelector(':scope > p');
+              f.scrollIntoView({block:'nearest'});
+              const a=f.getBoundingClientRect(), r=document.createRange();
+              r.selectNodeContents(p); const b=r.getBoundingClientRect();
+              return [a.left+1,a.top+a.height/2,b.right+1,b.top+b.height/2]; })()
+            """) as! [Double]
+        for (i,type) in [NSEvent.EventType.leftMouseDown,.leftMouseDragged,.leftMouseDragged,.leftMouseUp].enumerated() {
+            let t=[0.0,0.55,1.0,1.0][i]
+            let x=dragPoints[0]+(dragPoints[2]-dragPoints[0])*t, y=dragPoints[1]+(dragPoints[3]-dragPoints[1])*t
+            let point=rangeWeb.convert(NSPoint(x:x, y:rangeWeb.isFlipped ? y : rangeWeb.bounds.height-y),to:nil)
+            let event=NSEvent.mouseEvent(with:type,location:point,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+                windowNumber:window.windowNumber,context:nil,eventNumber:i+1,clickCount:1,pressure:1)!
+            switch type {
+            case .leftMouseDown: rangeWeb.mouseDown(with:event)
+            case .leftMouseDragged: rangeWeb.mouseDragged(with:event)
+            default: rangeWeb.mouseUp(with:event)
+            }
+            try await Task.sleep(for:.milliseconds(90))
+        }
+        try check(try await rangeWeb.evaluateJavaScript("getSelection().toString().includes('保留开头') && getSelection().toString().includes('保留结尾')") as? Bool==true,"鼠标从编辑段落拖向下一段时选区不完整")
+        try await pressDelete()
+        try await until("拖选全文后没有保留可输入的空正文") { m.inlineNote?.text=="" }
+        _ = try await rangeWeb.evaluateJavaScript("document.execCommand('insertText',false,'新正文')")
+        try await until("删除全部段落后不能继续写入") { m.snapshot.resolve(rangeQuestion.id)?.body=="新正文" }
+        let styled=Entry(kind:.questions,title:"保留选区外的格式",body:"**重复开头**\n\n中间\n\n[重复结尾](https://example.org)")
+        try m.store(styled)
+        m.go(.entry(styled.id))
+        try await until("格式选区测试未打开") {
+            guard let view=find(WKWebView.self,in:window.contentView) else { return false }
+            return (try? await view.evaluateJavaScript("!!article.querySelector('p > a') && !!article.querySelector('p > strong')") as? Bool)==true
+        }
+        let styledWeb=find(WKWebView.self,in:window.contentView)!
+        window.makeFirstResponder(styledWeb)
+        _ = try await styledWeb.evaluateJavaScript("""
+            getSelection().setBaseAndExtent(article.querySelector('strong').firstChild,2,article.querySelector('a').firstChild,2); true
+            """)
+        try await pressDelete()
+        try await until("选区两端的粗体或链接目标丢失") { m.inlineNote?.text=="**重复**[结尾](https://example.org)" }
+        // Reuse this fixture to check the Edit menu, keyboard, clipboard conversion and undo.
+        (styledWeb.navigationDelegate as? Reader.Bridge)?.pasteboard = board
+        func selectStyledRange() async throws {
+            _ = try await styledWeb.evaluateJavaScript("if(activeBlock) activeBlock.field?.blur(); true")
+            try await until("未回到带格式的原文") {
+                (try? await styledWeb.evaluateJavaScript("!activeBlock && article.querySelector('strong')?.textContent==='重复开头' && article.querySelector('a')?.textContent==='重复结尾'") as? Bool)==true
+            }
+            _ = try await styledWeb.evaluateJavaScript("""
+                getSelection().setBaseAndExtent(article.querySelector('strong').firstChild,2,article.querySelector('a').firstChild,2); true
+                """)
+            try await until("跨段选区未能接收原生文字输入") { (try? await styledWeb.evaluateJavaScript("article.isContentEditable && !getSelection().isCollapsed") as? Bool)==true }
+        }
+        try await shortcut("z",6)
+        try await selectStyledRange()
+        guard let inputClient=window.firstResponder as? NSTextInputClient else { throw Failure("阅读器未接收中文输入") }
+        let insertion=NSRange(location:NSNotFound,length:0)
+        inputClient.setMarkedText("zhong",selectedRange:NSRange(location:5,length:0),replacementRange:insertion)
+        try await Task.sleep(for:.milliseconds(80))
+        inputClient.insertText("中文",replacementRange:insertion)
+        try await until("确认中文候选词后未完整替换") { m.inlineNote?.text=="**重复**中文[结尾](https://example.org)" }
+        try await shortcut("z",6)
+        try await selectStyledRange()
+        try await shortcut("x",7)
+        try await until("跨段剪切未移除内容") { m.inlineNote?.text=="**重复**[结尾](https://example.org)" }
+        try check(board.string(forType: .string)=="**开头**\n\n中间\n\n[重复](https://example.org)", "剪切没有保留选区的 Markdown")
+        try await shortcut("z",6)
+        try await selectStyledRange()
+        board.clearContents()
+        board.setString("<table><tr><th>材料</th><th>结果</th></tr><tr><td>甲</td><td>乙</td></tr></table>",forType:.html)
+        try await shortcut("v",9)
+        try await until("粘贴的表格未替换所选段落") {
+            guard let t=m.inlineNote?.text else { return false }
+            return t.hasPrefix("**重复**\n\n|") && t.hasSuffix("\n\n[结尾](https://example.org)") && t.contains("材料") && !t.contains("中间")
+        }
+        try await shortcut("z",6)
+        try await selectStyledRange()
+        for char in ["a","b","c"] {
+            let event=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+                windowNumber:window.windowNumber,context:nil,characters:char,charactersIgnoringModifiers:char,isARepeat:false,keyCode:0)!
+            window.sendEvent(event)
+        }
+        try await until("快速连续输入未完整替换选区") { m.inlineNote?.text=="**重复**abc[结尾](https://example.org)" }
+        m.go(.doc("memo.md"))
+        try await until("切换 Memo 未复用阅读器") {
+            guard find(WKWebView.self,in:window.contentView) === styledWeb else { return false }
+            return (try? await styledWeb.evaluateJavaScript("state.file==='memo.md'") as? Bool)==true
+        }
+        m.navigate(.back)
+        try await until("回到条目后未恢复正确内容") {
+            (try? await styledWeb.evaluateJavaScript("!!article.querySelector('p > a') && article.textContent.includes('abc')") as? Bool)==true
+        }
+        m.expanded=["reports",Kind.entities.rawValue]
+        let reopened=Workspace()
+        reopened.root=folder
+        reopened.open(project)
+        try check(reopened.expanded==["reports",Kind.entities.rawValue],"重新打开项目丢失了侧栏折叠状态")
+        reopened.expanded=[]
+        reopened.open(project)
+        try check(reopened.expanded.isEmpty,"全部收起的状态没有保留")
+        let zoomWindow=NSWindow(contentRect:NSRect(x:90,y:100,width:820,height:540),
+                                styleMask:[.titled,.resizable,.closable,.fullSizeContentView],backing:.buffered,defer:false)
+        zoomWindow.titleVisibility = .hidden
+        zoomWindow.titlebarAppearsTransparent = true
+        zoomWindow.contentView=NSHostingView(rootView:MainView(model:reopened))
+        zoomWindow.makeKeyAndOrderFront(nil)
+        try await until("未找到页面顶部导航栏") { find(WindowTitleSurface.NavigationBar.self,in:zoomWindow.contentView) != nil }
+        let surface=find(WindowTitleSurface.NavigationBar.self,in:zoomWindow.contentView)!
+        func click(_ point: NSPoint, count: Int) {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event=NSEvent.mouseEvent(with:type,location:point,modifierFlags:[],
+                    timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:zoomWindow.windowNumber,context:nil,
+                    eventNumber:1,clickCount:count,pressure:type == .leftMouseDown ? 1 : 0)!
+                NSApp.sendEvent(event)
+            }
+        }
+        let initialFrame=zoomWindow.frame
+        for nativeTitleBar in [false,true] {
+            func doubleClickTopBar() {
+                zoomWindow.contentView?.layoutSubtreeIfNeeded()
+                let point = nativeTitleBar
+                    ? NSPoint(x:zoomWindow.frame.width/2, y:(zoomWindow.frame.height+zoomWindow.contentLayoutRect.maxY)/2)
+                    : surface.convert(NSPoint(x:surface.bounds.midX,y:surface.bounds.midY),to:nil)
+                click(point,count:2)
+            }
+            doubleClickTopBar()
+            try await until("双击顶部栏未放大窗口，原生标题栏 \(nativeTitleBar)") { zoomWindow.frame.width > initialFrame.width }
+            doubleClickTopBar()
+            try await until("再次双击顶部栏未还原，原生标题栏 \(nativeTitleBar)") { zoomWindow.frame.equalTo(initialFrame) }
+        }
+        try await until("未找到页面标题行") { find(WindowTitleSurface.PageTitle.self,in:zoomWindow.contentView) != nil }
+        let pageTitle=find(WindowTitleSurface.PageTitle.self,in:zoomWindow.contentView)!
+        func doubleClickPageTitle() {
+            zoomWindow.contentView?.layoutSubtreeIfNeeded()
+            click(pageTitle.convert(NSPoint(x:pageTitle.bounds.midX,y:pageTitle.bounds.midY),to:nil),count:2)
+        }
+        doubleClickPageTitle()
+        try await until("页面标题行双击未放大") { zoomWindow.frame.width > initialFrame.width }
+        doubleClickPageTitle()
+        try await until("页面标题行双击未还原") { zoomWindow.frame.equalTo(initialFrame) }
+        // A regular click on the sidebar control in the same row must still toggle the sidebar.
+        let originalWidth=surface.bounds.width
+        click(surface.convert(NSPoint(x:28,y:surface.bounds.midY),to:nil),count:1)
+        try await until("顶部栏遮住了切换大纲按钮") { surface.bounds.width > originalWidth+100 }
+        zoomWindow.orderOut(nil)
+        print("通过：跨段剪切、富文本粘贴替换、快速输入及侧栏重开状态")
+        print("通过：跨段选区的退格、向前删除、自动保存、撤销和重做")
         print("通过：从阅读或单元格编辑状态点击表下空行、末尾和中间插段、空行离焦、问题历史及只读资料")
         print("通过：整表菜单、剪切和原位粘贴、撤销和重做、单元格和矩形选区剪切、删除最后一行和最后一列")
         print("通过：逐段编辑、鼠标切段、失焦排版、列表与代码块、键盘跨段、新段落、段首与段尾合并、撤销、资料只读、链接与截图粘贴、自动保存及冲突保护；上下键保列跨段、长段折行、可视表格编辑、增删行列、聊天表格粘贴到正文和网格、Markdown 与制表符粘贴、矩形粘贴与撤销")

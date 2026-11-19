@@ -3,10 +3,10 @@ import SwiftUI
 struct ProjectDetail: View {
     @ObservedObject var m: Workspace
     var p: ProjectAt
-    func jump(_ title: String,_ image:String,_ dest:Place, _ subtitle:String = "") -> some View {
+    func jump(_ title: String,_ image:String,_ dest:Place, _ subtitle:String = "", color: Color = leaf) -> some View {
         Button { m.go(dest) } label: {
             HStack(spacing:10) { Image(systemName:image).foregroundStyle(leaf).frame(width:20); Text(title).lineLimit(2); Spacer(); if !subtitle.isEmpty { Text(subtitle).font(.caption).foregroundStyle(.secondary) }; Image(systemName:"chevron.right").font(.caption2).foregroundStyle(.secondary) }.padding(.vertical,7).contentShape(Rectangle())
-        }.buttonStyle(.plain)
+        }.buttonStyle(SidebarLinkStyle(color: color, horizontalInset: 4, verticalInset: 0))
     }
     @ViewBuilder var body: some View {
         switch m.place {
@@ -14,15 +14,15 @@ struct ProjectDetail: View {
         case .group(.references): ReferenceDirectory(m: m)
         case .webLinks: ReferencePage(m: m)
         case .group(let k): group(k)
-        case .entry(let id):
-            if let e = m.snapshot.resolve(id) {
-                if e.kind == .references { ReferenceFilePage(m: m, entry: e).id(e.id) }
-                else { entry(e) }
+        case .entry, .doc:
+            let item = m.displayedEntry
+            let document: String? = { if case .doc(let path) = m.place { return path }; return nil }()
+            if let item, item.kind == .references {
+                ReferenceFilePage(m: m, entry: item, document: document).id(document ?? item.id)
+            } else if let path = document ?? item?.path {
+                notePage(path: path, entry: item)
             } else if let note = m.inlineNote { NoteBody(m: m, path: note.path, text: note.text) }
             else { overview }
-        case .doc(let path):
-            if let ref = m.referenceDocument(path) { ReferenceFilePage(m: m, entry: ref, document: path).id(path) }
-            else { MarkdownPage(m: m, path: path) }
         }
     }
     var overview: some View {
@@ -60,7 +60,7 @@ struct ProjectDetail: View {
                 ForEach(entries) { e in
                     VStack(alignment: .leading, spacing: 3) {
                         HStack {
-                            jump(e.title, k.symbol, .entry(e.id), e.origin)
+                            jump(e.title, k.symbol, .entry(e.id), e.origin, color: PageCategory.kind(k).color)
                             if k == .questions { QuestionStatusButton(m: m, question: e) }
                         }
                         Divider()
@@ -69,62 +69,64 @@ struct ProjectDetail: View {
             }.padding(.horizontal,24).padding(.bottom,24)
         }.frame(maxWidth: .infinity, alignment: .leading) }
     }
-    func entry(_ e: Entry) -> some View {
-        return VStack(alignment:.leading,spacing:0) {
-            let header = PageHeading(title: e.title, category: .kind(e.kind), metadata: e.origin,
-                                     status: e.kind == .questions ? QuestionStatusButton(m: m, question: e) : nil,
-                                     editing: m.inlineNote.flatMap { $0.path == e.path && $0.editsMetadata ? $0 : nil }) {
-                PageActions {
-                    if e.kind == .questions {
-                        Button("继续研究此问题") { m.launch(.question, context: e.path) }
-                            .buttonStyle(ResearchActionStyle())
-                    }
-                    Button("关联…") { m.dialog = .relate(e) }
-                    Menu("更多") {
-                        if e.kind != .questions { Button("用 Codex 修订正文") { m.launch(.revise, context:e.path) } }
-                        if e.kind == .questions {
-                            Button("添加子问题…") {
-                                var question = Entry(kind:.questions,title:"")
-                                question.links = [e.id]
-                                m.dialog = .editor(Editor(entry:question))
-                            }
-                            Button(e.answered ? "重新打开问题" : "标为已回答") { m.toggleQuestionStatus(e.id) } }
-                        Button("引用到我的 Memo") { m.editDoc("memo.md",append:"[" + e.title + "](feynman:" + e.id + ")") }
-                        Button("关联知识库资料…") { m.attach(library:true,to:e) }
-                        Button("添加参考资料…") { m.attach(library:false,to:e) }
-                        Button("回写到知识库…") { m.dialog = .cite(e) }
-                        Divider()
-                        Button("合并到其他条目…") { m.dialog = .merge(e) }
-                        Button("删除条目…") { m.dialog = .remove(e) }
-                    }.fixedSize()
-                }
-            }
-            ViewThatFits(in:.vertical) {
-                header.fixedSize(horizontal:false,vertical:true)
-                ScrollView { header }.frame(height: 405)
-            }.frame(maxHeight:405,alignment:.topLeading).fixedSize(horizontal:false,vertical:true)
-            Divider()
-            NoteBody(m: m, path: e.path, text: e.body, history: e.kind == .questions ? e.questionHistory : nil)
-
+    // One reader stays mounted when history moves between a report and an entry.
+    // Only its data and heading change, retaining the already-loaded WebKit scripts.
+    private func notePage(path: String, entry: Entry?) -> some View {
+        let result = Result {
+            if let entry { return entry.body }
+            guard let text = try m.text(path) else { throw Failure("文件尚未同步或已移走。") }
+            return Document(text).body
         }
-    }
-}
-
-struct MarkdownPage: View {
-    @ObservedObject var m: Workspace
-    let path: String
-    var body: some View {
-        let result = Result { guard let text = try m.text(path) else { throw Failure("文件尚未同步或已移走。") }; return text }
-        let body = (try? result.get()).map { Document($0).body } ?? ""
-        return VStack(alignment:.leading,spacing:0) {
-            PageHeading(title: documentLabel(path), category: PageCategory(document: path)) { actions(body) }
+        let body = (try? result.get()) ?? ""
+        return VStack(alignment: .leading, spacing: 0) {
+            if let entry { entryHeading(entry) }
+            else { PageHeading(title: documentLabel(path), category: PageCategory(document: path)) { documentActions(path, body) } }
             Divider()
             if case .failure(let err) = result, m.inlineNote?.path != path { Text(err.localizedDescription).padding() }
-            else { NoteBody(m: m, path: path, text: body, extract: path.hasPrefix("reports/") || path == "questions.md") }
+            else {
+                NoteBody(m: m, path: path, text: body,
+                         extract: entry == nil && (path.hasPrefix("reports/") || path == "questions.md"),
+                         history: entry?.kind == .questions ? entry?.questionHistory : nil)
+            }
         }
     }
 
-    private func actions(_ body: String) -> some View {
+    private func entryHeading(_ e: Entry) -> some View {
+        let header = PageHeading(title: e.title, category: .kind(e.kind), metadata: e.origin,
+                                 status: e.kind == .questions ? QuestionStatusButton(m: m, question: e) : nil,
+                                 editing: m.inlineNote.flatMap { $0.path == e.path && $0.editsMetadata ? $0 : nil }) {
+            PageActions {
+                if e.kind == .questions {
+                    Button("继续研究此问题") { m.launch(.question, context: e.path) }
+                        .buttonStyle(ResearchActionStyle())
+                }
+                Button("关联…") { m.dialog = .relate(e) }
+                Menu("更多") {
+                    if e.kind != .questions { Button("用 Codex 修订正文") { m.launch(.revise, context:e.path) } }
+                    if e.kind == .questions {
+                        Button("添加子问题…") {
+                            var question = Entry(kind:.questions,title:"")
+                            question.links = [e.id]
+                            m.dialog = .editor(Editor(entry:question))
+                        }
+                        Button(e.answered ? "重新打开问题" : "标为已回答") { m.toggleQuestionStatus(e.id) } }
+                    Button("引用到我的 Memo") { m.editDoc("memo.md",append:"[" + e.title + "](feynman:" + e.id + ")") }
+                    Button("关联知识库资料…") { m.attach(library:true,to:e) }
+                    Button("添加参考资料…") { m.attach(library:false,to:e) }
+                    Button("回写到知识库…") { m.dialog = .cite(e) }
+                    Divider()
+                    Button("合并到其他条目…") { m.dialog = .merge(e) }
+                    Button("删除条目…") { m.dialog = .remove(e) }
+                }.fixedSize()
+            }
+        }
+        return ViewThatFits(in:.vertical) {
+            header.fixedSize(horizontal:false,vertical:true)
+            ScrollView { header }.frame(height: 405)
+        }.frame(maxHeight:405,alignment:.topLeading).fixedSize(horizontal:false,vertical:true)
+    }
+
+    private func documentActions(_ path: String, _ body: String) -> some View {
         PageActions {
             if path == "memo.md", !body.clean.isEmpty { Button("回写到知识库…") { m.launch(.publish,context:path) } }
             if path.hasPrefix("reports/") {

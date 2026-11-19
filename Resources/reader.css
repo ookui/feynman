@@ -46,3 +46,5 @@ article table,.sima-table-block,.sima-table,.history-answer table{font-size:12px
 .after-table-line:is(:hover,:focus-visible,.in-table-gap)::after{
   content:attr(aria-label);margin-left:6px;vertical-align:middle;color:#65738a;font-size:12px
 }
+
+article[contenteditable=true]{outline:0}

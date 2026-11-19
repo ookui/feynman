@@ -90,7 +90,9 @@ struct PageHeading<Content: View>: View {
             if let editing { InlineNoteTitle(draft: editing) }
             else { Text(title).font(.system(size: 28, weight: .bold))
                 .foregroundStyle(ink).textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true) }
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(WindowTitleSurface(pageTitle: true)) }
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 16) {
                     tags.fixedSize()

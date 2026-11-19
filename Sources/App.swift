@@ -109,9 +109,9 @@ struct MainView: View {
                     if model.project != nil {
                         Button { if model.canGoBack { model.navigate(.back) } else { model.home() } } label: { Image(systemName:"chevron.left") }.help(model.canGoBack ? "返回上一页" : "返回项目列表")
                         Button { model.navigate(.forward) } label: { Image(systemName:"chevron.right") }.help("前进").disabled(!model.canGoForward)
-                        Text(model.project?.info.title ?? "").lineLimit(1)
-                    } else { Text("项目空间") }
-                    Spacer()
+                    }
+                    Text(model.project?.info.title ?? "项目空间").lineLimit(1)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                     if let p = model.project {
                         Button { NSWorkspace.shared.activateFileViewerSelecting([p.url]) } label: { Image(systemName:"folder") }.help("在 Finder 中显示项目")
                         if let recent = model.consoles.last(where: { $0.project.id == p.id }) {
@@ -121,6 +121,8 @@ struct MainView: View {
                     }
                     Button { model.dialog = .settings } label: { Image(systemName:"gearshape") }.help("本机设置")
                 }.buttonStyle(.plain).foregroundStyle(leaf).padding(.horizontal,20).frame(height:48)
+                 .background(WindowTitleSurface())
+
                 Divider()
                 VSplitView {
                     HStack(spacing: 0) {
@@ -190,6 +192,45 @@ struct MainView: View {
         }
     }
 }
+// The toolbar handles its empty space. AppKit owns the separate title strip above it.
+struct WindowTitleSurface: NSViewRepresentable {
+    var pageTitle = false
+    class Surface: NSView {
+        private var titleMonitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let titleMonitor { NSEvent.removeMonitor(titleMonitor); self.titleMonitor = nil }
+            guard let window else { return }
+            titleMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self, weak window] event in
+                guard let self, let window, event.window === window, event.clickCount == 2,
+                      window.attachedSheet == nil, !window.styleMask.contains(.fullScreen) else { return event }
+                if self is PageTitle {
+                    guard !self.isHiddenOrHasHiddenAncestor, self.visibleRect.contains(self.convert(event.locationInWindow, from: nil)) else { return event }
+                } else if event.locationInWindow.y < window.contentLayoutRect.maxY { return event }
+                for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                    if let button = window.standardWindowButton(kind), !button.isHidden,
+                       button.bounds.contains(button.convert(event.locationInWindow, from: nil)) { return event }
+                }
+                window.performZoom(nil)
+                return nil
+            }
+        }
+        override var mouseDownCanMoveWindow: Bool { false }
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            if event.clickCount == 2 { window.performZoom(nil) }
+            else { window.performDrag(with: event) }
+        }
+    }
+    // Text selection and scrolling still receive the original single click and drag.
+    final class NavigationBar: Surface {}
+    final class PageTitle: Surface {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+    func makeNSView(context: Context) -> Surface { pageTitle ? PageTitle() : NavigationBar() }
+    func updateNSView(_ view: Surface, context: Context) {}
+}
 private struct PaneDivider: View {
     let label: String
     let width: CGFloat
@@ -226,6 +267,7 @@ private struct PaneDivider: View {
 
 struct SidebarLinkStyle: ButtonStyle {
     var selected = false
+    var color = leaf
     var fullWidth = true
     var horizontalInset: CGFloat = 6
     var verticalInset: CGFloat = 4
@@ -236,37 +278,41 @@ struct SidebarLinkStyle: ButtonStyle {
             .padding(.horizontal, horizontalInset)
             .padding(.vertical, verticalInset)
             .contentShape(Rectangle())
-            .modifier(SidebarLinkFeedback(selected: selected, pressed: configuration.isPressed))
+            .modifier(SidebarLinkFeedback(selected: selected, color: color, pressed: configuration.isPressed))
     }
 }
 
 private struct SidebarLinkFeedback: ViewModifier {
     var selected: Bool
+    var color: Color
     var pressed: Bool
     @State private var hovered = false
 
     func body(content: Content) -> some View {
         let opacity = pressed ? 0.32 : selected ? (hovered ? 0.28 : 0.18) : (hovered ? 0.12 : 0)
-        content.background(leaf.opacity(opacity), in: RoundedRectangle(cornerRadius: 5))
+        content.background(color.opacity(opacity), in: RoundedRectangle(cornerRadius: 5))
             .onHover { hovered = $0 }
     }
 }
 
 struct Sidebar: View {
     @ObservedObject var m: Workspace
-    func row(_ label:String,_ category:PageCategory?,_ place:Place) -> some View {
+    func row(_ label:String,_ category:PageCategory?,_ place:Place, hover: PageCategory? = nil) -> some View {
         Button { m.go(place) } label: {
             HStack {
                 if let category { CategoryTag(category: category, compact: true) }
                 Text(label).lineLimit(1)
                 Spacer()
             }
-        }.buttonStyle(SidebarLinkStyle(selected: m.place == place, horizontalInset: 8, verticalInset: 6))
+        }.buttonStyle(SidebarLinkStyle(selected: m.place == place, color: (hover ?? category)?.color ?? leaf, horizontalInset: 8, verticalInset: 6))
     }
-    func toggle(_ name:String) { if !m.expanded.insert(name).inserted { m.expanded.remove(name) } }
+    func toggle(_ name: String) {
+        if m.expanded.contains(name) { m.expanded.remove(name) } else { m.expanded.insert(name) }
+    }
     var body: some View {
         VStack(alignment:.leading,spacing:0) {
             HStack(spacing:9) { Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high).frame(width:32,height:32); Text("Feynman").font(.system(size:23,weight:.medium,design:.serif)).lineLimit(1).minimumScaleFactor(0.8) }.padding(.leading,18).padding(.top,17).padding(.bottom,20)
+                .frame(maxWidth: .infinity, alignment: .leading)
             Button { m.home(); m.refreshProjects() } label: { Label { Text("所有项目") } icon: { CategoryTag(category: .project, compact: true) } }.buttonStyle(SidebarLinkStyle(selected: m.project == nil, horizontalInset: 8, verticalInset: 8)).padding(.horizontal,10)
             Divider().padding(.vertical,8)
             if m.project != nil {
@@ -330,14 +376,14 @@ struct Sidebar: View {
                 }
             }.buttonStyle(SidebarLinkStyle())
         }
-        if m.expanded.contains("reports") { ForEach(m.snapshot.reports,id:\.self) { r in row(documentLabel(r),nil,.doc(r)).padding(.leading,40).contextMenu { Button("编辑报告…") { m.editDoc(r) } } } }
+        if m.expanded.contains("reports") { ForEach(m.snapshot.reports,id:\.self) { r in row(documentLabel(r),nil,.doc(r), hover: .report).padding(.leading,40).contextMenu { Button("编辑报告…") { m.editDoc(r) } } } }
         ForEach(Kind.allCases) { k in
             let entries = m.snapshot.entries.filter { $0.kind == k }
             HStack(spacing:3) {
                 Button { toggle(k.rawValue) } label:{ Image(systemName:m.expanded.contains(k.rawValue) ? "chevron.down":"chevron.right").frame(width:13) }.buttonStyle(SidebarLinkStyle(fullWidth: false, horizontalInset: 2))
                 Button { m.go(.group(k)); m.expanded.insert(k.rawValue) } label: {
                     HStack(spacing: 3) { CategoryTag(category: .kind(k), compact: true); Text(k.englishLabel).lineLimit(1).minimumScaleFactor(0.85); Spacer(minLength: 1); Text("\(entries.count + (k == .references ? m.snapshot.unlistedMaterials.count : 0))").font(.caption).foregroundStyle(.secondary) }
-                }.buttonStyle(SidebarLinkStyle(selected: m.place == .group(k), horizontalInset: 2))
+                }.buttonStyle(SidebarLinkStyle(selected: m.place == .group(k), color: PageCategory.kind(k).color, horizontalInset: 2))
                 if k == .references {
                     Menu { AddReferenceActions(m: m) } label: { Image(systemName: "plus").font(.caption) }
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("添加参考资料")
@@ -350,16 +396,16 @@ struct Sidebar: View {
                 if k == .references {
                     row("网页链接", .webLinks, .webLinks).padding(.leading, 27).modifier(ReferenceFileDrop(m: m))
                     ForEach(m.snapshot.unlistedMaterials.filter { !MaterialLinks.isWeb($0) },id:\.self) { path in
-                        Button { m.attempt { m.go(.entry(try m.registerMaterial(path).id)) } } label: { Text((path as NSString).lastPathComponent).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()) }.buttonStyle(SidebarLinkStyle()).padding(.leading,42)
+                        Button { m.attempt { m.go(.entry(try m.registerMaterial(path).id)) } } label: { Text((path as NSString).lastPathComponent).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()) }.buttonStyle(SidebarLinkStyle(color: PageCategory.kind(k).color)).padding(.leading,42)
                     }
                 }
                 ForEach(entries.filter { !m.snapshot.isWebReference($0) }) { e in
                     Button { m.go(.entry(e.id)) } label: {
                         HStack(spacing:6) {
                             Text(e.title).lineLimit(1); Spacer(minLength:0)
-                            if e.origin == "预研提取" { Tag(text:e.origin,color:PageCategory.kind(k).color) }
+                            if e.origin == "预研提取" { Tag(text:e.origin,color:Color(white: 0.42)) }
                         }
-                    }.buttonStyle(SidebarLinkStyle(selected: m.place == .entry(e.id))).padding(.leading,42).help(e.title).contextMenu { EntryActions(m: m, entry: e) }
+                    }.buttonStyle(SidebarLinkStyle(selected: m.place == .entry(e.id), color: PageCategory.kind(k).color)).padding(.leading,42).help(e.title).contextMenu { EntryActions(m: m, entry: e) }
                 }
             }
         }

@@ -186,6 +186,7 @@ function removeDeletedLinks(root,data) {
 function renderHistory(turns, expanded, openTurns) {
   const details = document.createElement('details');
   details.className = 'question-history';
+  details.contentEditable='false';
   details.open = expanded;
   const summary = document.createElement('summary');
   summary.textContent = '追问记录' + (turns.length ? '（' + turns.length + '）' : '');
@@ -232,10 +233,14 @@ function renderHistory(turns, expanded, openTurns) {
   article.append(details);
 }
 function render(data) {
+  if (composingRange && data.file===file && data.body===state.body && data.editID===state.editID) {
+    state=data;
+    return;
+  }
   if (data.file!==file || data.editID!==state?.editID) {
-    tableHistory.body=null;
-    tableHistory.undo.length=0;
-    tableHistory.redo.length=0;
+    blockHistory.body=null;
+    blockHistory.undo.length=0;
+    blockHistory.redo.length=0;
   }
   const sameSession = data.file === file && data.editID && data.editID === state?.editID;
   if (sameSession && activeBlock) {
@@ -254,6 +259,8 @@ function render(data) {
   }
 }
 function paint(data, keepScroll = false) {
+  composingRange=null;
+  article.removeAttribute('contenteditable');
   if (file !== data.file) { tableWidths.clear(); verticalX = null; }
   const same = file === data.file, lastY = same ? scrollY : data.scroll;
   const selection = getSelection();
@@ -284,7 +291,8 @@ function paint(data, keepScroll = false) {
       }
       const el = block.firstElementChild;
       if (el) {
-        sourceBlocks.set(el, {start, end});
+        const inline=['paragraph','heading'].includes(token.type) ? token.tokens : null;
+        sourceBlocks.set(el, {start, end, inline});
         if (token.type === 'table') prepareTable(el, data.body.slice(start,end),start,end,tableOrdinal++);
         if (token.type === 'blockquote') {
           const parts = [...token.raw.matchAll(/^(?:[ \t]{0,3}>[ \t]*)?[^\s>][^\n]*(?:\n(?![ \t]{0,3}>[ \t]*$|[ \t]*$)[^\n]+)*/gm)];
@@ -298,7 +306,9 @@ function paint(data, keepScroll = false) {
             const raw = token.items[i]?.raw;
             const at = raw && data.body.indexOf(raw, next);
             if (raw && at >= next && at + raw.length <= cursor) {
-              sourceBlocks.set(li, {start:at, end:at + raw.replace(/\n+$/, '').length});
+              const children=token.items[i].tokens;
+              const inline=children.length===1 && children[0].type==='text' ? children[0].tokens : null;
+              sourceBlocks.set(li, {start:at, end:at + raw.replace(/\n+$/, '').length, inline});
               next = at + raw.length;
             }
           });
@@ -351,7 +361,7 @@ function paint(data, keepScroll = false) {
     }
     span.element.replaceWith(frag);
   }
-  index = documentIndex(article);
+  if (hits.length) index = documentIndex(article);
   if (selectedText) {
     const match = locate(index, selectedText);
     if (match) {
@@ -441,6 +451,12 @@ function openBlockAt(offset, targetY = null, target = null) {
   if (state?.editable === false) return;
   target ??= pendingClick?.file===file && pendingClick.offset===offset ? pendingClick.target : null;
   pendingClick=null;
+  if (target?.deletion && target.body===state.body && state.editID) {
+    getSelection().removeAllRanges();
+    article.removeAttribute('contenteditable');
+    recordBlockSplice(target.deletion);
+    return;
+  }
   const afterTable=target?.afterTable===true;
   const blocks = mappedBlocks();
   // The innermost match selects a single list item, even when its parent covers the same offset.

@@ -32,6 +32,7 @@ final class NoteTextView: NSTextView {
 }
 
 enum NotePaste {
+    static let noteMarkdown = NSPasteboard.PasteboardType("app.feynman.markdown-selection")
     static let tableMarkdown = NSPasteboard.PasteboardType("app.feynman.markdown-table")
     static let tableCells = NSPasteboard.PasteboardType("app.feynman.table-cells")
     private static let tableDivider = #"^ *\|? *:?-+:? *(?:\| *:?-+:? *)*\|? *$"#
@@ -43,6 +44,7 @@ enum NotePaste {
     }
 
     static func markdown(from board: NSPasteboard, beside note: URL, selection: String = "", htmlFallback: String? = nil) throws -> String? {
+        if let text = board.string(forType: noteMarkdown) { return text }
         if let table = board.string(forType: tableMarkdown) { return table }
         let plain = board.string(forType: .string)
         if let html = board.string(forType: .html) ?? htmlFallback, !html.isEmpty {

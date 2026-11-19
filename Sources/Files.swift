@@ -168,7 +168,11 @@ struct ProjectAt: Identifiable, Hashable {
     var id: String { info.id }
 }
 struct Snapshot {
-    var all: [Entry] = []
+    var all: [Entry] = [] { didSet { indexEntries() } }
+    private(set) var entries: [Entry] = []
+    private var entryOffsets: [String: Int] = [:]
+    private(set) var deletedIDs: Set<String> = []
+    private(set) var deletedPaths: Set<String> = []
     var reports: [String] = []
     var documents: [String] = []
     var issues: [String] = []
@@ -179,9 +183,17 @@ struct Snapshot {
     var citations: [String: Set<String>] = [:]
     var unlistedMaterials: [String] = []
     var looseAssets: [String] = []
-    var entries: [Entry] {
+    private mutating func indexEntries() {
         let displaced = Set(all.flatMap(\.aliases))
-        return all.filter { !$0.deleted && !displaced.contains($0.id) }
+        entries = all.filter { !$0.deleted && !displaced.contains($0.id) }
+        entryOffsets.removeAll(keepingCapacity: true)
+        for (index, entry) in entries.enumerated() {
+            for id in [entry.id] + entry.aliases where entryOffsets[id] == nil { entryOffsets[id] = index }
+        }
+        deletedIDs = Set(all.filter(\.deleted).flatMap { [$0.id] + $0.aliases }).subtracting(entryOffsets.keys)
+        deletedPaths = Set(all.filter { deletedIDs.contains($0.id) }.flatMap { item in
+            [item.path, item.original.flatMap { Document($0).string("legacy_path") }].compactMap { $0 }
+        })
     }
     func related(to item: Entry) -> [Entry] {
         let outgoing = Set(item.links)
@@ -204,17 +216,7 @@ struct Snapshot {
         var seen = Set<String>()
         return (direct + linked).filter { seen.insert($0.id).inserted }
     }
-    func resolve(_ id: String) -> Entry? { entries.first { $0.id == id || $0.aliases.contains(id) } }
-    var deletedIDs: Set<String> {
-        let dead = all.filter(\.deleted).flatMap { [$0.id] + $0.aliases }
-        return Set(dead).subtracting(entries.flatMap { [$0.id] + $0.aliases })
-    }
-    var deletedPaths: Set<String> {
-        let dead = deletedIDs
-        return Set(all.filter { dead.contains($0.id) }.flatMap { item in
-            [item.path, item.original.flatMap { Document($0).string("legacy_path") }].compactMap { $0 }
-        })
-    }
+    func resolve(_ id: String) -> Entry? { entryOffsets[id].map { entries[$0] } }
     var needsLinkCleanup: Bool {
         let dead = deletedIDs, paths = deletedPaths
         guard !dead.isEmpty else { return false }
@@ -397,6 +399,7 @@ enum Files {
     }
     static func scan(_ root: URL) throws -> Snapshot {
         var result = Snapshot()
+        var entries: [Entry] = [], seen = Set<String>()
         for k in Kind.allCases {
             let dir = try child(root, k.rawValue)
             guard fm.fileExists(atPath: dir.path) else { continue }
@@ -410,12 +413,13 @@ enum Files {
                             entry = Entry(kind: k, path: path, raw: overlay.header + entry.body + overlay.body)
                             entry.referenceMetadata = metadata
                         }
-                        if result.all.contains(where: { $0.id == entry.id }) { result.issues.append("编号重复：" + path) }
-                        else { result.all.append(entry) }
+                        if !seen.insert(entry.id).inserted { result.issues.append("编号重复：" + path) }
+                        else { entries.append(entry) }
                     }
                 } catch { result.issues.append(path + "：" + error.localizedDescription) }
             }
         }
+        result.all = entries
         result.reports = try list(child(root, "reports")).filter { $0.pathExtension.lowercased() == "md" }.map { "reports/" + $0.lastPathComponent }
         result.documents = ["README.md","questions.md","companies.md","challenge.md"].filter { fm.fileExists(atPath: root.appendingPathComponent($0).path) }
         let registered = Set(result.all.flatMap { $0.assets + $0.retiredAssets + Array($0.archivedSources.keys) })

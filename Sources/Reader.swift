@@ -30,6 +30,7 @@ struct Reader: NSViewRepresentable {
         config.userContentController.add(context.coordinator, name: "reader")
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "notePaste")
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "tableCopy")
+        config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "selectionClipboard")
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
         if let url = Bundle.main.url(forResource: "reader", withExtension: "html") { web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent()) }
@@ -50,6 +51,7 @@ struct Reader: NSViewRepresentable {
     }
     static func dismantleNSView(_ web: WKWebView, coordinator: Bridge) {
         let controller = web.configuration.userContentController
+        controller.removeScriptMessageHandler(forName: "selectionClipboard", contentWorld: .page)
         controller.removeScriptMessageHandler(forName: "reader")
         controller.removeScriptMessageHandler(forName: "notePaste", contentWorld: .page)
         controller.removeScriptMessageHandler(forName: "tableCopy", contentWorld: .page)
@@ -96,6 +98,27 @@ struct Reader: NSViewRepresentable {
         var pasteboard: NSPasteboard = .general
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage,
                                    replyHandler: @escaping (Any?, String?) -> Void) {
+            if message.name == "selectionClipboard" {
+                guard message.frameInfo.isMainFrame, let m = message.body as? [String: Any],
+                      let path = m["file"] as? String, data?.file == path, data?.editable == true,
+                      model.canEditNote(path), let expected = m["body"] as? String,
+                      expected == (model.inlineNote.flatMap { $0.path == path ? $0.text : nil } ?? data?.body) else {
+                    replyHandler(nil, "正文已更新，请重新选择。"); return
+                }
+                if m["action"] as? String == "cut", let text = m["text"] as? String {
+                    let item = NSPasteboardItem()
+                    guard item.setString(text, forType: .string), item.setString(text, forType: NotePaste.noteMarkdown) else {
+                        replyHandler(nil, "无法复制选中的正文。"); return
+                    }
+                    pasteboard.clearContents()
+                    if pasteboard.writeObjects([item]) { replyHandler(true,nil) }
+                    else { replyHandler(nil, "无法写入剪贴板。") }
+                } else if m["action"] as? String == "paste" {
+                    do { replyHandler(try NotePaste.markdown(from: pasteboard, beside: model.documentURL(path), htmlFallback: m["html"] as? String), nil) }
+                    catch { replyHandler(nil,error.localizedDescription) }
+                } else { replyHandler(nil, "无法读取选区操作。") }
+                return
+            }
             guard message.frameInfo.isMainFrame,
                   let m = message.body as? [String: Any], let note = model.inlineNote,
                   data?.editable != false, model.canEditNote(note.path), note.path == data?.file, m["id"] as? String == note.id.uuidString else {

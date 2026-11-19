@@ -3,61 +3,71 @@
 const tableSources = new WeakMap();
 const tableWidths = new Map();
 
-// Unlike a cell edit, removing a table destroys its editor. Keep this splice available
-// to the surrounding note, including the Markdown separators it consumed.
-const tableHistory = {file:null, body:null, undo:[], redo:[]};
+// The active field is replaced by a repaint after structural edits, so its native
+// undo stack cannot restore them. Journal the exact Markdown splice instead.
+const blockHistory = {file:null, body:null, undo:[], redo:[]};
 
-function applyTableRemoval(step, restore) {
+function applyBlockSplice(step, restore) {
   closeBlock(false,false);
-  const length = restore ? 0 : step.removed.length, value = restore ? step.removed : '';
-  const caret = restore ? step.tableStart : step.caret;
+  const value = restore ? step.removed : step.value;
+  const length = restore ? step.value.length : step.removed.length;
+  const caret = restore ? step.restoreCaret : step.caret;
   const body = state.body.slice(0,step.start) + value + state.body.slice(step.start+length);
-  const widths = [...tableWidths.entries()];
-  tableWidths.clear();
-  for (const [i,w] of widths) {
-    if (i < step.ordinal) tableWidths.set(i,w);
-    else if (restore || i > step.ordinal) tableWidths.set(i+(restore ? 1 : -1),w);
+  if (step.tableCount || step.insertedTables) {
+    const removed=restore ? step.insertedTables || 0 : step.tableCount;
+    const added=restore ? step.tableCount : step.insertedTables || 0;
+    const widths = [...tableWidths];
+    tableWidths.clear();
+    for (const [i,w] of widths) {
+      if (i < step.ordinal) tableWidths.set(i,w);
+      else if (i >= step.ordinal+removed) tableWidths.set(i-removed+added,w);
+    }
+    if (restore) for (const [i,w] of step.widths ?? []) tableWidths.set(i,w);
   }
-  if (restore && step.widths) tableWidths.set(step.ordinal,step.widths);
   send({action:'change', id:state.editID, start:step.start, length, value, caret});
   paint({...state,body},true);
   openBlockAt(caret,null,restore ? step.cell : null);
-  if (restore && activeBlock?.grid) activeBlock.cellUndo.push(...step.cellUndo);
-  tableHistory.body = body;
+  if (restore && step.cellUndo && activeBlock?.grid) activeBlock.cellUndo.push(...step.cellUndo);
+  blockHistory.body = body;
+}
+
+function recordBlockSplice(step) {
+  const body=activeBlock ? paragraphBody(activeBlock) : state.body;
+  if (blockHistory.file!==file || blockHistory.body!==body) blockHistory.undo.length=0;
+  blockHistory.file=file;
+  blockHistory.redo.length=0;
+  if (step.tableCount) step.widths=[...tableWidths].filter(([i])=>i>=step.ordinal && i<step.ordinal+step.tableCount);
+  blockHistory.undo.push(step);
+  if (blockHistory.undo.length>40) blockHistory.undo.shift();
+  applyBlockSplice(step,false);
 }
 
 function removeTableBlock(edit, ordinal) {
   if (activeBlock!==edit) return;
   const body = paragraphBody(edit);
-  if (tableHistory.file!==file || tableHistory.body!==body) tableHistory.undo.length=0;
-  tableHistory.file=file;
-  tableHistory.redo.length=0;
   const left=body.slice(0,edit.start), right=body.slice(edit.start+edit.raw.length);
   const before=left.match(/\n*$/)[0].length, after=right.match(/^\n*/)[0].length;
   const edge=before===left.length || after===right.length;
   const start=edit.start-(edge ? before : 0);
   const skip=edge ? after : Math.min(before,after);
   const selection=edit.grid.getSelection();
-  const step={start, removed:body.slice(start,edit.start+edit.raw.length+skip),
-    tableStart:edit.start, caret:start+after-skip, ordinal, widths:tableWidths.get(ordinal),
-    cell:{row:selection.top,column:selection.left}, cellUndo:edit.cellUndo};
-  tableHistory.undo.push(step);
-  if (tableHistory.undo.length>40) tableHistory.undo.shift();
-  applyTableRemoval(step,false);
+  recordBlockSplice({start, removed:body.slice(start,edit.start+edit.raw.length+skip), value:'',
+    restoreCaret:edit.start, caret:start+after-skip, ordinal, tableCount:1,
+    cell:{row:selection.top,column:selection.left}, cellUndo:edit.cellUndo});
 }
 
 document.addEventListener('keydown', event => {
   if ((!event.metaKey && !event.ctrlKey) || event.altKey || event.key.toLowerCase()!=='z' ||
-      event.isComposing || !activeBlock || !state.editID || tableHistory.file!==file ||
+      event.isComposing || !activeBlock || !state.editID || blockHistory.file!==file ||
       !activeBlock.holder.contains(event.target)) return;
   const restore=!event.shiftKey;
-  const from=restore ? tableHistory.undo : tableHistory.redo;
-  if (!from.length || paragraphBody(activeBlock)!==tableHistory.body) return;
+  const from=restore ? blockHistory.undo : blockHistory.redo;
+  if (!from.length || paragraphBody(activeBlock)!==blockHistory.body) return;
   event.preventDefault();
   event.stopPropagation();
   const step=from.pop();
-  (restore ? tableHistory.redo : tableHistory.undo).push(step);
-  applyTableRemoval(step,restore);
+  (restore ? blockHistory.redo : blockHistory.undo).push(step);
+  applyBlockSplice(step,restore);
 },true);
 
 function applyTableWidths(table,widths) {

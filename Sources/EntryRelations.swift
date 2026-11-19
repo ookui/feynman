@@ -133,10 +133,26 @@ struct EntryRelations: View {
     }
 
     private var viewPicker: some View {
-        Picker("关联视图", selection: $list) {
-            Text("关系图").tag(false)
-            Text("列表").tag(true)
-        }.pickerStyle(.segmented).labelsHidden().fixedSize()
+        HStack(spacing: 2) {
+            viewTab("关系图", isList: false)
+            viewTab("列表", isList: true)
+        }.padding(2).background(Color(white: 0.88), in: RoundedRectangle(cornerRadius: 7))
+        .accessibilityElement(children: .contain).accessibilityLabel("关联视图")
+    }
+
+    private func viewTab(_ title: String, isList: Bool) -> some View {
+        let selected = list == isList
+        return Button { list = isList } label: {
+            Text(title).font(.system(size: 12, weight: selected ? .semibold : .regular))
+                .foregroundStyle(Color(white: selected ? 0.18 : 0.36))
+                .frame(minWidth: 45, minHeight: 22)
+                .background(selected ? Color.white : .clear, in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
+        .onMoveCommand { direction in
+            if direction == .left { list = false }
+            if direction == .right { list = true }
+        }
     }
 
     private func nodeButton(_ node: RelationNode, lines: Int?) -> some View {

@@ -97,7 +97,7 @@ struct ReferenceDirectory: View {
             Button(action: open) {
                 HStack { Label(title, systemImage: symbol); Spacer(); Image(systemName: "chevron.right").font(.caption) }
                     .padding(.vertical, 10).contentShape(Rectangle())
-            }.buttonStyle(.plain)
+            }.buttonStyle(SidebarLinkStyle(color: PageCategory.kind(.references).color, verticalInset: 0))
             Divider()
         }
     }
@@ -116,10 +116,11 @@ struct ReferencePage: View {
             List {
                 ForEach(links) { entry in
                     Button { m.go(.entry(entry.id)) } label: { Label(entry.title, systemImage: "link") }
-                        .buttonStyle(.plain).contextMenu { EntryActions(m: m, entry: entry) }
+                        .buttonStyle(SidebarLinkStyle(color: PageCategory.webLinks.color)).contextMenu { EntryActions(m: m, entry: entry) }
                 }
                 ForEach(unlisted, id: \.self) { source in
                     Button(materialLabel(source)) { m.attempt { m.go(.entry(try m.registerMaterial(source).id)) } }
+                        .buttonStyle(SidebarLinkStyle(color: PageCategory.webLinks.color))
                 }
                 if links.isEmpty && unlisted.isEmpty { Text("尚未添加网页链接。").foregroundStyle(.secondary) }
             }

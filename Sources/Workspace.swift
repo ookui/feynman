@@ -77,7 +77,11 @@ enum Dialog: Identifiable {
     @Published var showEntryRelations = true
     var activeConsole: ResearchSession? { consoles.first { $0.id == selectedConsole && $0.project.id == project?.id } }
     @Published var revision = 0
-    @Published var expanded: Set<String> = []
+    @Published var expanded: Set<String> = [] {
+        didSet {
+            if let project, expanded != oldValue { preferences.set(expanded.sorted(), forKey: "outlineExpanded." + project.id) }
+        }
+    }
     @Published var search = "" { didSet { updateSearch() } }
     @Published private(set) var searchIndex = ProjectSearchIndex()
     @Published private(set) var searchHits: [ProjectSearchHit] = []
@@ -186,8 +190,12 @@ enum Dialog: Identifiable {
         refresh()
         let dest = Place(preferences.string(forKey: "last." + p.id))
         place = valid(dest) ? dest : .overview
-        expanded = Set(snapshot.entries.map { $0.kind.rawValue } + ["reports"])
-        if !snapshot.looseAssets.isEmpty { expanded.insert(Kind.references.rawValue) }
+        if let saved = preferences.stringArray(forKey: "outlineExpanded." + p.id) {
+            expanded = Set(saved)
+        } else {
+            expanded = Set(snapshot.entries.map { $0.kind.rawValue } + ["reports"])
+            if !snapshot.looseAssets.isEmpty { expanded.insert(Kind.references.rawValue) }
+        }
     }
     func valid(_ p: Place) -> Bool {
         switch p {
