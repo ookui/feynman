@@ -1,165 +1,242 @@
 'use strict';
 
-// Marked removes the parent indentation when tokenizing nested items. Map its
-// line numbers back to the original Markdown, including continuation lines.
 const listItems = new WeakMap();
 const listParts = new WeakMap();
-const listMarker = /^([ \t]*)([-+*]|\d+[.)])([ \t]+|$)/;
-function mapListItems(root, token, raw, start) {
-  const lines=raw.split('\n'), offsets=[start];
-  for (const line of lines) offsets.push(offsets.at(-1)+line.length+1);
-  const items=[];
-  function visit(list, element, line, parent) {
-    let previous=null;
-    const children=[...element.children].filter(el=>el.tagName==='LI');
-    for (const [i,item] of list.items.entries()) {
-      const el=children[i], marker=listMarker.exec(lines[line] ?? '');
-      if (!el || !marker) return;
-      const count=item.raw.replace(/\n+$/,'').split('\n').length;
-      const indent=columns(marker[1]), padding=columns(marker[0])-indent-marker[2].length;
-      const info={start:offsets[line], end:offsets[line+count]-1, indent,
-        content:indent+marker[2].length+(padding>=1 && padding<=4 ? padding : 1),
-        parent,previous,items};
-      items.push(info);
-      listItems.set(el,info);
-      if (!parent) {
-        const children=item.tokens;
-        const inline=children.length===1 && children[0].type==='text' ? children[0].tokens : null;
-        sourceBlocks.set(el,{start:info.start,end:info.end,inline});
-      }
-      // Preserve the source's optional leading indentation on a standalone list.
-      if (!parent && indent) el.style.marginInlineStart=indent+'ch';
-      const nested=[...el.children].filter(child=>child.matches('ul,ol'));
-      const sublists=[];
-      let cursor=0, n=0;
-      for (const child of item.tokens) {
-        const at=item.text.indexOf(child.raw,cursor);
-        if (at<0) continue;
-        if (child.type==='list' && nested[n]) {
-          const node=nested[n++], childLine=line+item.text.slice(0,at).split('\n').length-1;
-          const last=visit(child,node,childLine,info);
-          if (last) sublists.push({node,start:offsets[childLine],end:last.end});
+const listRoots = new WeakMap();
+
+function mapListItems(element, token, raw, start) {
+  const roots = listStructure(token, raw, start);
+  listRoots.set(element, roots);
+  function bind(list, nodes) {
+    const elements = [...list.children].filter(el => el.matches('li'));
+    nodes.forEach((node,i) => {
+      const el = elements[i];
+      if (!el) return;
+      node.root = element;
+      listItems.set(el,node);
+      if (node.ordered) list.start = node.first;
+      if (node.task && state.editable !== false) {
+        const box = el.querySelector('input[type=checkbox]');
+        if (box && box.closest('li') === el) {
+          box.disabled = false;
+          box.setAttribute('aria-label','完成此项');
+          box.onclick = event => {
+            event.stopPropagation();
+            let at = node.start+node.prefix.length+1;
+            if (activeBlock && activeBlock.end <= node.start) at += blockValue(activeBlock).length-(activeBlock.end-activeBlock.start);
+            closeBlock(false,false);
+            const removed = state.body[at];
+            if (!/[ xX]/.test(removed ?? '')) return;
+            const change = {start:at,removed,value:removed === ' ' ? 'x' : ' ',caret:at+2,restoreCaret:at+2};
+            if (state.editID) recordBlockSplice(change); else commitRange(change);
+          };
         }
-        cursor=at+child.raw.length;
       }
-      if (sublists.length) {
-        info.sublistStarts=sublists.map(sub=>sub.start);
-        mapListProse(el,info,sublists,raw,start);
+      const nested = [...el.children].filter(child => child.matches('ol,ul'));
+      const groups = node.groups;
+      let from = node.start, first = el.firstChild;
+      for (let j=0; j<=groups.length; j++) {
+        const group = groups[j], sub = group && nested[j];
+        if (group && !sub) break;
+        const until = sub ? group[0].start : node.end;
+        const range = raw.slice(from-start,until-start);
+        const leading = from === node.start;
+        const skip = leading ? 0 : range.match(/^(?:[ \t]*\n)*/)[0].length;
+        const end = until-range.match(/(?:\n[ \t]*)*$/)[0].length;
+        if (leading || end > from+skip) {
+          const span = {start:from+skip,end,leading,node};
+          // Each head and each prose segment owns its actual source span.
+          // Parents stay mounted while their descendants are being edited.
+          let part = el;
+          if (groups.length) {
+            part = document.createElement('div');
+            el.insertBefore(part,first);
+            while (first && first !== sub) {
+              const next = first.nextSibling;
+              part.append(first);
+              first = next;
+            }
+          }
+          listParts.set(part,span);
+          const children = node.token.tokens;
+          const inline = children.length === 1 && ['text','paragraph'].includes(children[0].type) ? children[0].tokens : null;
+          sourceBlocks.set(part,{...span,inline});
+        }
+        if (sub) {
+          bind(sub,group);
+          from = Math.min(node.end, group.at(-1).end + 1);
+          first = sub.nextSibling;
+        }
       }
-      previous=info;
-      line+=item.raw.split('\n').length-1;
-    }
-    return previous;
+    });
   }
-  visit(token,root,0,null);
-}
-// Each editable span stops at a direct sublist, so editing a parent leaves
-// its children mounted and clickable. A loose list can have more prose after it.
-function mapListProse(el,item,sublists,raw,start) {
-  let from=item.start, first=el.firstChild;
-  for (const sub of [...sublists,{node:null,start:item.end}]) {
-    const leading=from===item.start;
-    const text=raw.slice(from-start,sub.start-start).replace(/(?:\n[ \t]*)+$/,'');
-    if (leading || text.trim()) {
-      const skip=leading ? 0 : text.match(/^(?:[ \t]*\n)*/)[0].length;
-      const part=document.createElement('div');
-      el.insertBefore(part,first);
-      while (first && first!==sub.node) {
-        const next=first.nextSibling;
-        part.append(first);
-        first=next;
-      }
-      listParts.set(part,{start:from+skip,end:from+text.length,leading});
-    }
-    if (sub.node) {
-      from=sub.end+1;
-      first=sub.node.nextSibling;
-    }
-  }
-}
-function columns(whitespace) {
-  let column=0;
-  for (const c of whitespace) column+=c==='\t' ? 4-column%4 : 1;
-  return column;
-}
-
-function listItemAt(offset) {
-  return [...article.querySelectorAll('li')].map(el=>listItems.get(el))
-    .filter(item=>item && item.start<=offset && offset<=item.end).at(-1);
+  bind(element,roots);
 }
 
-function indentList(first,last,outdent,selection) {
-  if (!first || !last || first.items!==last.items) return false;
-  const items=first.items, selected=items.slice(items.indexOf(first),items.indexOf(last)+1);
-  const edits=[], breaks=new Set(), body=state.body;
-  function paragraphBreak(at) {
-    if (at>0 && at<body.length && body.slice(body.lastIndexOf('\n',at-2)+1,at-1).trim() &&
-        !/^[ \t]*(?:\n|$)/.test(body.slice(at))) breaks.add(at);
-  }
-  let covered=-1, groupParent, delta=0;
-  for (const item of selected) {
-    if (item.start<covered) continue; // Moving a parent also moves its descendants.
-    if (groupParent!==item.parent || outdent) {
-      groupParent=item.parent;
-      if (outdent) delta=-Math.max(0,item.indent-(item.parent?.indent ?? 0));
-      else if (item.previous) delta=Math.max(0,item.previous.content-item.indent);
-      else {
-        // Without a preceding sibling Markdown permits up to three spaces of
-        // visual indentation. Four would turn the list into a code block.
-        const extra=item.indent-(item.parent?.content ?? 0);
-        delta=extra<2 ? 2 : 0;
-      }
-    }
-    covered=item.end;
-    const unlist=outdent && !item.parent && item.indent===0;
-    if (unlist) {
-      paragraphBreak(item.start);
-      paragraphBreak(item.end+1);
-      for (const at of item.sublistStarts ?? []) paragraphBreak(at);
-      delta=-item.content;
-    }
-    if (!delta && !unlist) continue;
-    for (let at=item.start; at<=item.end;) {
-      const newline=state.body.indexOf('\n',at);
-      const end=newline<0 ? item.end : Math.min(item.end,newline);
-      const line=state.body.slice(at,end);
-      if (line.trim()) {
-        const stripMarker=unlist && at===item.start;
-        const prefix=stripMarker ? line.match(/^[ \t]*(?:[-+*]|\d+[.)])(?:[ \t]+|$)(?:\[[ xX]\](?:[ \t]+|$))?/)[0] : line.match(/^[ \t]*/)[0];
-        const value=stripMarker ? '' : ' '.repeat(Math.max(0,columns(prefix)+delta));
-        if (value!==prefix) edits.push({at,prefix,value});
-      }
-      at=end+1;
+function outlineFor(node) {
+  const blocks = [node.root];
+  function extend(back) {
+    for (;;) {
+      const outer = back ? blocks[0] : blocks.at(-1);
+      const el = back ? outer.previousElementSibling : outer.nextElementSibling;
+      if (!listRoots.has(el)) break;
+      const left = back ? el : outer, right = back ? outer : el;
+      if (state.body.slice(listRoots.get(left).at(-1).end,listRoots.get(right)[0].start) !== '\n') break;
+      if (back) blocks.unshift(el); else blocks.push(el);
     }
   }
-  for (const edit of edits) {
-    if (breaks.delete(edit.at)) edit.value='\n'+edit.value;
+  extend(true);
+  extend(false);
+  return new ListOutline(state.body, blocks.flatMap(el => listRoots.get(el)));
+}
+
+function applyListChange(outline, before, from, to=from) {
+  const raw = state.body.slice(outline.start,outline.end);
+  let value = outline.write();
+  // Turning a root into prose must also separate it from adjacent non-list blocks.
+  const shift = !outline.rows[0].mark && outline.start>0 && !/\n[ \t]*\n$/.test(state.body.slice(0,outline.start)) ? 1 : 0;
+  if (shift) value = '\n'+value;
+  if (outline.rows.at(-1).node && !outline.rows.at(-1).mark && outline.end < state.body.length &&
+      !/^\n[ \t]*\n|^\n$/.test(state.body.slice(outline.end))) value += '\n';
+  const offset = p => outline.start + shift + p.row.offset + p.offset;
+  const after = before.rendered ? before : {start:offset(from),end:offset(to),backward:before.backward};
+  if (value === raw) { restoreListSelection(after); return; }
+  // Journal only the changed slice, including marker-width changes on later lines.
+  let a = 0, b = raw.length, c = value.length;
+  while (a<b && a<c && raw[a]===value[a]) a++;
+  while (b>a && c>a && raw[b-1]===value[c-1]) { b--; c--; }
+  const step = {start:outline.start+a,removed:raw.slice(a,b),value:value.slice(a,c),
+    caret:after.rendered ? outline.start : after.end, restoreCaret:before.rendered ? outline.start : before.end,
+    listBefore:before,listAfter:after};
+  if (state.editID) recordBlockSplice(step); else commitRange(step);
+}
+
+function indentRenderedItems(range,out) {
+  const position = positionForRange(range);
+  if (!position) return false;
+  const spans = index.spans.filter(s => position.start<s.end && position.end>s.start);
+  const owner = span => span && listItems.get(span.element.parentElement?.closest('li'));
+  const first = owner(spans[0]), last = owner(spans.at(-1));
+  if (!first || !last) return false;
+  const outline = outlineFor(first), a = outline.heads.get(first), b = outline.heads.get(last);
+  if (!b) return false;
+  const heads = outline.rows.slice(outline.rows.indexOf(a),outline.rows.indexOf(b)+1).filter(row => row.node);
+  const set = new Set(heads);
+  const roots = heads.filter(row => !set.has(row.parent));
+  if (outline.move(roots,out)) {
+    const sel = getSelection();
+    applyListChange(outline,{...position,rendered:true,backward:sel.anchorNode===range.endContainer && sel.anchorOffset===range.endOffset});
   }
-  for (const at of breaks) edits.push({at,prefix:'',value:'\n'});
-  edits.sort((a,b)=>a.at-b.at);
-  if (!edits.length) return true;
-  const start=edits[0].at, end=edits.at(-1).at+edits.at(-1).prefix.length;
-  let value='', cursor=start;
-  for (const change of edits) {
-    value+=state.body.slice(cursor,change.at)+change.value;
-    cursor=change.at+change.prefix.length;
-  }
-  function moved(offset) {
-    let shift=0;
-    for (const change of edits) {
-      if (offset<change.at) break;
-      const diff=change.value.length-change.prefix.length;
-      if (offset<change.at+change.prefix.length) return change.at+shift+Math.max(change.value.startsWith('\n') ? 1 : 0,offset-change.at+diff);
-      shift+=diff;
-    }
-    return offset+shift;
-  }
-  const after=selection.rendered ? selection : {...selection,start:moved(selection.start),end:moved(selection.end)};
-  const step={start,removed:state.body.slice(start,end),value,restoreCaret:first.start,caret:moved(first.start),
-    listBefore:selection,listAfter:after};
-  if (state.editID) recordBlockSplice(step);
-  else commitRange(step);
   return true;
+}
+
+// When a field is replaced after a structural command, its native text undo
+// stack disappears. Keep the completed typing run between two outline steps.
+function rememberListTyping(edit, caret) {
+  const removed = state.body.slice(edit.start,edit.end), value = blockValue(edit);
+  if (!state.editID || removed === value) return;
+  if (blockHistory.file !== file || blockHistory.body !== state.body) blockHistory.undo.length = 0;
+  blockHistory.file = file;
+  blockHistory.redo.length = 0;
+  blockHistory.undo.push({start:edit.start,removed,value,caret,restoreCaret:edit.entryCaret});
+  if (blockHistory.undo.length > 40) blockHistory.undo.shift();
+  blockHistory.body = paragraphBody(edit);
+}
+
+function pendingListMark(edit) {
+  return edit.acceptMarker && /^(?:[-+*]|\d{1,9}[.)])$/.test(edit.field.value);
+}
+
+function listSourcePrefix(edit) {
+  if (!edit.listPrefix) return '';
+  if (pendingListMark(edit)) return edit.listPrefix.match(/^[ \t]*/)[0];
+  return edit.listPrefix + (edit.field.value && !/[ \t]$/.test(edit.listPrefix) ? ' ' : '');
+}
+
+function listInput(edit, event) {
+  if (!edit.listPrefix || event.isComposing || edit.composing) return false;
+  const field = edit.field;
+  const typed = edit.acceptMarker && listMarker.exec(field.value);
+  if (typed && !typed[1] && typed[3] && !field.value.includes('\n')) {
+    field.setRangeText('',0,typed[0].length,'preserve');
+    editListCommand(edit,'marker',typed);
+    return true;
+  }
+  edit.acceptMarker = !field.value || (edit.acceptMarker && /^(?:\d{1,9}[.)]?|[-+*])$/.test(field.value));
+  edit.holder.closest('li')?.classList.toggle('typing-list-marker',!!pendingListMark(edit));
+  return false;
+}
+
+function clipboardList(text) {
+  const body = text.replace(/\r\n?/g,'\n');
+  const tokens = marked.lexer(body).filter(t => t.type !== 'space');
+  if (!tokens.length || tokens.some(t => t.type !== 'list')) return null;
+  let cursor = 0;
+  const roots = [];
+  for (const token of tokens) {
+    const raw = token.raw.trimEnd(), start = body.indexOf(raw,cursor);
+    if (start < 0 || body.slice(cursor,start).trim()) return null;
+    cursor = start+raw.length;
+    cursor += body.slice(cursor).match(/^[ \t]*/)[0].length;
+    roots.push(...listStructure(token,body.slice(start,cursor),start));
+  }
+  return roots.length && !body.slice(cursor).trim() ? new ListOutline(body,roots) : null;
+}
+
+function editListCommand(edit,command,argument) {
+  const field = edit.field, origin = fieldStart(edit);
+  const before = {start:origin+field.selectionStart,end:origin+field.selectionEnd,backward:field.selectionDirection==='backward'};
+  // Reparse once so offsets/ownership include anything typed since the last paint.
+  closeBlock(false,false);
+  const el = mappedBlocks(true).findLast(el => {
+    const part = listParts.get(el);
+    return part && part.start<=before.start && before.start<=part.end;
+  });
+  const owner = listParts.get(el)?.node;
+  if (!owner) { restoreListSelection(before); return; }
+  const outline = outlineFor(owner), head = outline.heads.get(owner);
+  const a = outline.position(before.start), b = outline.position(before.end);
+  if (!a || !b) { restoreListSelection(before); return; }
+  let caret;
+  switch (command) {
+  case 'indent': case 'outdent':
+    if (outline.move([head],command==='outdent')) { applyListChange(outline,before,a,b); return; }
+    break;
+  case 'enter':
+    if (a.row !== b.row) {
+      const start = outline.rows.indexOf(a.row), end = outline.rows.indexOf(b.row);
+      const tail = b.row.text.slice(b.offset);
+      a.row.text = a.row.text.slice(0,a.offset)+tail;
+      outline.rows.splice(start+1,end-start);
+      b.row = a.row; b.offset = a.offset;
+    }
+    caret = outline.split(a,b);
+    break;
+  case 'paste':
+    caret = outline.paste(head,a.offset,b.offset,argument);
+    break;
+  case 'marker':
+    head.mark = argument[2]; head.first = /^\d/.test(head.mark) ? Number.parseInt(head.mark,10) : 1;
+    head.gap = ' '; head.retyped = true;
+    outline.dirty.add(head.parent);
+    caret = {row:head,offset:a.offset};
+    break;
+  case 'backspace':
+    if (head.parent || !outline.previous(head)) {
+      outline.move([head],true);
+      caret = {row:head,offset:0};
+    } else {
+      const prev = outline.rows.slice(0,outline.rows.indexOf(head)).findLast(row => row.node || row.text.trim());
+      caret = outline.join(prev,head);
+    }
+    break;
+  case 'delete': {
+    const next = outline.rows.slice(outline.rows.indexOf(head)+1).find(row => row.node || row.text.trim());
+    if (next?.node) caret = outline.join(head,next);
+    break;
+  }
+  }
+  if (caret) applyListChange(outline,before,caret); else restoreListSelection(before);
 }
 
 function restoreListSelection(selection) {
@@ -183,7 +260,7 @@ function restoreListSelection(selection) {
   const edit=activeBlock;
   if (!edit || edit.grid) return;
   if (selection.end<=edit.end) {
-    edit.field.setSelectionRange(selection.start-edit.start,selection.end-edit.start,selection.backward ? 'backward' : 'forward');
+    edit.field.setSelectionRange(Math.max(0,selection.start-fieldStart(edit)),Math.max(0,selection.end-fieldStart(edit)),selection.backward ? 'backward' : 'forward');
   } else {
     closeBlock(false,false);
     const a=renderedCaretAt(selection.start), b=renderedCaretAt(selection.end);
@@ -193,27 +270,4 @@ function restoreListSelection(selection) {
       armRangeInput();
     }
   }
-}
-
-function indentEditingItem(edit,outdent) {
-  const {field}=edit, start=fieldStart(edit)+field.selectionStart, end=fieldStart(edit)+field.selectionEnd;
-  const selection={start,end,backward:field.selectionDirection==='backward'};
-  closeBlock(false,false);
-  let lastOffset=end>start ? end-1 : end;
-  while (lastOffset>start && state.body[lastOffset]==='\n') lastOffset--;
-  const first=listItemAt(start), last=listItemAt(lastOffset);
-  indentList(first,last,outdent,selection);
-  // A list at its outer boundary still owns Tab and keeps the caret in place.
-  if (!activeBlock && getSelection().isCollapsed) restoreListSelection(selection);
-}
-
-function indentRenderedItems(range,outdent) {
-  const pos=positionForRange(range);
-  if (!pos) return false;
-  const hits=index.spans.filter(s=>pos.start<s.end && pos.end>s.start);
-  const owner=s=>listItems.get((s.element.parentElement ?? s.element).closest('li'));
-  const first=owner(hits[0]), last=owner(hits.at(-1));
-  const sel=getSelection();
-  return indentList(first,last,outdent,{...pos,rendered:true,
-    backward:sel.anchorNode===range.endContainer && sel.anchorOffset===range.endOffset});
 }

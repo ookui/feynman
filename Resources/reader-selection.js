@@ -73,7 +73,7 @@ function selectedPart(range,el) {
 }
 
 function deletionForRange(range, replacement=null, cut=false) {
-  const parts=mappedBlocks().filter(el=>!el.matches('button') && ![...el.children].some(child=>sourceBlocks.has(child)))
+  const parts=mappedBlocks().filter(el=>!el.matches('button') && !listRoots.has(el) && ![...el.children].some(child=>sourceBlocks.has(child)))
     .map(el=>selectedPart(range,el)).filter(Boolean);
   if (!parts.length) return null;
   const first=parts[0], last=parts.at(-1);
@@ -253,8 +253,16 @@ function renderedCaretAt(sourceOffset) {
   if (raw.includes(marker)) return null;
   // Insert a marker in a detached parse so hidden list prefixes, emphasis and
   // link destinations do not shift the drag's starting point after reflow.
-  const probe=sanitize(marked.parse(raw.slice(0,offset)+marker+raw.slice(offset)));
-  const visible=probe.querySelector(block.localName)?.textContent;
+  const part = listParts.get(block);
+  let visible;
+  if (part?.leading && !raw.includes('\n')) {
+    const prefix = part.node.prefix.length;
+    const at = Math.max(prefix,offset);
+    visible = sanitize(marked.parseInline(raw.slice(prefix,at)+marker+raw.slice(at))).textContent;
+  } else {
+    const probe=sanitize(marked.parse(raw.slice(0,offset)+marker+raw.slice(offset)));
+    visible=probe.querySelector(block.localName)?.textContent;
+  }
   let remaining=offset===0 ? 0 : offset===raw.length ? block.textContent.length : visible?.indexOf(marker);
   if (offset>0 && offset<raw.length && visible?.replace(marker,'')!==block.textContent) return null;
   if (remaining==null || remaining<0) return null;

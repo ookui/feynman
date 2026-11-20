@@ -126,6 +126,9 @@ import WebKit
         try check(NotePaste.plainMarkdown(existing, selection: "") == existing, "Markdown 链接或代码被重复转换")
         try check(NotePaste.plainMarkdown("https://example.org", selection: "出处") == "[出处](https://example.org)", "选中文字粘贴网址失败")
         board.clearContents()
+        board.setString("<ol start='9'><li>甲<ul><li><b>乙</b></li></ul></li><li>丙</li></ol>", forType: .html)
+        try check(try NotePaste.markdown(from: board, beside: project.url.appendingPathComponent("memo.md")) == "9. 甲\n   - **乙**\n10. 丙", "粘贴网页列表丢失起始编号、粗体或子项")
+        board.clearContents()
         let image = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 3, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         let png = image.representation(using: .png, properties: [:])!
         board.setData(png, forType: .png)
@@ -277,7 +280,7 @@ import WebKit
         let listOK = try await memoWeb.evaluateJavaScript("""
           (() => { const item=article.querySelectorAll('li')[1], r=item.getBoundingClientRect();
             item.dispatchEvent(new MouseEvent('click',{bubbles:true,detail:1,clientX:r.x+8,clientY:r.y+8}));
-            return activeBlock.field.value==='- 重复' && article.querySelector('li').textContent==='重复' && !!article.querySelector('pre code'); })()
+            return activeBlock.field.value==='重复' && activeBlock.listPrefix==='- ' && article.querySelector('li').textContent==='重复' && !!article.querySelector('pre code'); })()
           """)
         try check(listOK as? Bool == true, "列表定位或相邻列表项排版错误")
         _ = try await memoWeb.evaluateJavaScript("""
@@ -285,11 +288,11 @@ import WebKit
             document.execCommand('insertText',false,'二');
             f.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true})); })()
           """)
-        try check(try await memoWeb.evaluateJavaScript("activeBlock.field.value==='  - 重复二' && activeBlock.holder.parentElement.parentElement.matches('li') && activeBlock.field.selectionStart===activeBlock.field.value.length") as? Bool == true, "Tab 未缩进当前列表项或移动了光标")
+        try check(try await memoWeb.evaluateJavaScript("activeBlock.field.value==='重复二' && activeBlock.listPrefix==='  - ' && activeBlock.holder.parentElement.parentElement.matches('li') && activeBlock.field.selectionStart===activeBlock.field.value.length") as? Bool == true, "Tab 未缩进当前列表项或移动了光标")
         _ = try await memoWeb.evaluateJavaScript("""
             const sendListKey=(key,shiftKey=false)=>activeBlock.field.dispatchEvent(new KeyboardEvent('keydown',{key,shiftKey,bubbles:true,cancelable:true}));
             sendListKey('Tab',true);
-            if (activeBlock.field.value!=='- 重复二') throw Error('Shift+Tab 未恢复列表层级');
+            if (activeBlock.field.value!=='重复二' || activeBlock.listPrefix!=='- ') throw Error('Shift+Tab 未恢复列表层级');
             sendListKey('Tab',true);
             if (activeBlock.tag!=='P' || activeBlock.field.value!=='重复二' || activeBlock.field!==document.activeElement) throw Error('顶层未退出列表');
             sendListKey('ArrowRight');
@@ -308,7 +311,7 @@ import WebKit
         m.go(.entry(entry.id))
         try check(try m.text("memo.md") == fixture.replacingOccurrences(of: "- 重复\n\n", with: "\n重复二\n\n") + "\n\n新的段落", "相同文本的条目被改错或分隔符丢失")
         let outline="前文\n\n10. 父项\n11. **重复**\n12. 重复\n    - 子项\n      - 孙项\n    - 小结\n13. 末项\n\n后文"
-        let nested="前文\n\n10. 父项\n    11. **重复**\n    12. 重复\n        - 子项\n          - 孙项\n        - 小结\n13. 末项\n\n后文"
+        let nested="前文\n\n10. 父项\n    1. **重复**\n    2. 重复\n       - 子项\n         - 孙项\n       - 小结\n11. 末项\n\n后文"
         let outlineEntry=Entry(kind:.questions,title:"列表缩进",body:outline)
         try m.store(outlineEntry)
         m.go(.entry(outlineEntry.id))
@@ -344,10 +347,7 @@ import WebKit
             })()
             """)
         try await listKey("\t",48)
-        let firstTwo=outline.replacingOccurrences(of:"\n10.",with:"\n  10.").replacingOccurrences(of:"\n11.",with:"\n  11.")
-        try await until("从列表首行开始选择时未缩进两行") { m.inlineNote?.text==firstTwo }
-        try await listKey("\u{19}",48,.shift)
-        try await until("列表首行和第二行没有同时恢复") { m.inlineNote?.text==outline }
+        try check(m.inlineNote?.text==outline, "首项没有上一个同级项时应保留原层级")
         func clickListText(_ selector: String) async throws {
             let xy = try await outlineWeb.callAsyncJavaScript("""
                 const el=article.querySelector(selector);
@@ -364,17 +364,17 @@ import WebKit
         }
         try await clickListText("ol > li:nth-child(3) > div")
         try await until("点击父项展开了子列表或撑高输入框") {
-            (try? await outlineWeb.evaluateJavaScript("activeBlock?.field.value==='12. 重复' && activeBlock.field.clientHeight<parseFloat(getComputedStyle(activeBlock.field).lineHeight)*1.5 && article.querySelectorAll('li:nth-child(3) li').length===3") as? Bool)==true
+            (try? await outlineWeb.evaluateJavaScript("activeBlock?.field.value==='重复' && activeBlock.listPrefix==='12. ' && activeBlock.field.clientHeight<parseFloat(getComputedStyle(activeBlock.field).lineHeight)*1.5 && article.querySelectorAll('li:nth-child(3) li').length===3") as? Bool)==true
         }
         try await clickListText("ol > li:nth-child(3) > ul > li:last-child")
         try await until("从父项点击子项时没有切换到该行") {
-            (try? await outlineWeb.evaluateJavaScript("activeBlock?.field.value==='    - 小结'") as? Bool)==true
+            (try? await outlineWeb.evaluateJavaScript("activeBlock?.field.value==='小结' && activeBlock.listPrefix==='    - '") as? Bool)==true
         }
         try await listKey("\u{19}",48,.shift)
-        let lifted=outline.replacingOccurrences(of:"    - 小结",with:"- 小结")
+        let lifted=outline.replacingOccurrences(of:"    - 小结\n13. 末项",with:"13. 小结\n14. 末项")
         try await until("子项反缩进后没有回到顶层") { m.inlineNote?.text==lifted }
         try await listKey("\u{19}",48,.shift)
-        let plain=lifted.replacingOccurrences(of:"- 小结\n",with:"\n小结\n\n")
+        let plain=lifted.replacingOccurrences(of:"13. 小结\n",with:"\n小结\n\n")
         try await until("再次反缩进没有得到独立普通段落") { m.snapshot.resolve(outlineEntry.id)?.body==plain }
         try check(try await outlineWeb.evaluateJavaScript("activeBlock.field.value==='小结' && activeBlock.tag==='P' && !activeBlock.holder.closest('li')") as? Bool==true,"退出列表后光标没有留在普通段落")
         try await listKey("z",6,.command)

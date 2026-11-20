@@ -105,7 +105,7 @@ enum NotePaste {
             let body = (try? root.nodes(forXPath: "//body").first) ?? root
             if hasBitmap, (body.stringValue ?? "").clean.isEmpty, (try? body.nodes(forXPath: ".//img").count) == 1 { return nil }
             // Some copy buttons wrap plain Markdown or tabular text in a rich-text span.
-            if let plain, (try? body.nodes(forXPath: "descendant-or-self::table | descendant-or-self::pre | descendant-or-self::code").isEmpty) == true {
+            if let plain, (try? body.nodes(forXPath: "descendant-or-self::table | descendant-or-self::pre | descendant-or-self::code | descendant-or-self::ul | descendant-or-self::ol").isEmpty) == true {
                 if let table = tabularText(plain) { return table }
                 if plain.components(separatedBy: "\n\n").contains(where: { isTableBlock($0) }) {
                     return plainMarkdown(plain, selection: selection)
@@ -236,7 +236,30 @@ enum NotePaste {
         let tag = el.name?.lowercased() ?? ""
         switch tag {
         case "script", "style", "head", "noscript": return ""
+        case "ol", "ul":
+            var number = min(999_999_999, max(0, Int(attribute("start") ?? "") ?? 1))
+            var items: [String] = []
+            for child in el.children ?? [] {
+                guard let item = child as? XMLElement, item.name?.lowercased() == "li" else { continue }
+                let marker = tag == "ol" ? "\(number). " : "- "
+                let indent = String(repeating: " ", count: marker.count)
+                var text = ""
+                for part in item.children ?? [] {
+                    let value = try convert(part, base: base, note: note)
+                    if ["ul", "ol"].contains(part.name?.lowercased() ?? "") {
+                        text = text.trimmingCharacters(in: .whitespacesAndNewlines) + "\n" + value.clean + "\n"
+                    } else {
+                        text += value
+                    }
+                }
+                let lines = text.trimmingCharacters(in: .newlines).components(separatedBy: "\n")
+                items.append(marker + (lines.first ?? "").clean + lines.dropFirst().map { $0.isEmpty ? "\n" : "\n" + indent + $0 }.joined())
+                number = number < 999_999_999 ? number + 1 : 999_999_999
+            }
+            return items.isEmpty ? "" : "\n\n" + items.joined(separator: "\n") + "\n\n"
         case "table": return try convertTable(el, base: base, note: note)
+        case "input" where attribute("type")?.lowercased() == "checkbox":
+            return attribute("checked") == nil ? "[ ] " : "[x] "
         case "br": return "\n"
         case "pre": return "\n\n```\n" + (el.stringValue ?? "") + "\n```\n\n"
         case "code": return "`" + (el.stringValue ?? "") + "`"
@@ -262,13 +285,10 @@ enum NotePaste {
         case "b", "strong": return "**" + inner + "**"
         case "em", "i": return "*" + inner + "*"
         case "h1", "h2", "h3", "h4", "h5", "h6": return "\n\n" + String(repeating: "#", count: Int(tag.suffix(1))!) + " " + inner.clean + "\n\n"
-        case "li":
-            let ordered = el.parent?.name?.lowercased() == "ol"
-            return (ordered ? "1. " : "- ") + inner.clean + "\n"
         case "blockquote": return "\n\n" + inner.clean.components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n") + "\n\n"
         case "td", "th": return inner + "\t"
         case "tr": return inner + "\n"
-        case "p", "div", "section", "ul", "ol": return inner.clean.isEmpty ? "" : "\n\n" + inner.clean + "\n\n"
+        case "p", "div", "section": return inner.clean.isEmpty ? "" : "\n\n" + inner.clean + "\n\n"
         default: return inner
         }
     }

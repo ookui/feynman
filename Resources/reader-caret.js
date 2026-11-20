@@ -10,7 +10,7 @@ const caretLayout = {
       position:'fixed', left:rect.left+'px', top:rect.top-field.scrollTop+'px',
       width:field.clientWidth+'px', font:style.font, lineHeight:style.lineHeight,
       letterSpacing:style.letterSpacing, padding:style.padding, textAlign:style.textAlign,
-      direction:style.direction, tabSize:style.tabSize, whiteSpace:style.whiteSpace,
+      direction:style.direction, tabSize:style.tabSize, textIndent:style.textIndent, whiteSpace:style.whiteSpace,
       overflowWrap:style.overflowWrap, wordBreak:style.wordBreak
     });
     const text = document.createTextNode(field.value + '\u200b');

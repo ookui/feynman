@@ -80,6 +80,107 @@ import WebKit
         guard historyResult as? String == "追问记录已验证", bridge.received?["action"] as? String == "link",
               bridge.received?["href"] as? String == "feynman:contract" else { throw Failure(String(describing:historyResult)) }
         print("追问记录通过：默认折叠、展开、时间顺序、Markdown、来源链接、刷新与切换问题")
+        let leadingLineResult = try await web.evaluateJavaScript(#"""
+          (() => {
+            const key = key => activeBlock.field.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));
+            const pointer = (el,type) => el.dispatchEvent(new PointerEvent(type,{pointerType:'mouse'}));
+            for (const first of ['','原文','## 标题','- 列表项','\n\n已有前导换行']) {
+              const body = first ? first+'\n\n第二段。' : '', start = Math.max(0,first.search(/\S/));
+              render({file:'memo.md',editID:'test-'+first,editOffset:start,editable:true,body,marks:[],scroll:0});
+              const top = activeBlock.field.getBoundingClientRect().top;
+              key('Enter');
+              const line = article.querySelector('.leading-line');
+              if (!line || Math.abs(activeBlock.field.getBoundingClientRect().top-top-line.offsetHeight)>1 ||
+                  activeBlock.field.selectionStart!==0 || paragraphBody(activeBlock)!==body) return '回车没有将首段下移一行：'+first;
+              key('Enter');
+              if (article.querySelectorAll('.leading-line').length!==2) return '连续回车没有再次下移';
+              key('Backspace');
+              pointer(line,'pointermove');
+              if (document.activeElement!==activeBlock.field || activeBlock.field.value!=='') return '移入首行后无法输入';
+              document.execCommand('insertText',false,'　 ');
+              pointer(activeBlock.holder,'pointerleave');
+              if (article.querySelector('.leading-line') || blockValue(activeBlock)!==first.trimStart() ||
+                  activeBlock.field.getBoundingClientRect().top!==top || state.body!==body) return '移出后首行未复原';
+            }
+            key('Enter');
+            key('ArrowUp');
+            document.execCommand('insertText',false,'新写的首段');
+            pointer(activeBlock.holder,'pointerleave');
+            if (activeBlock.field.value!=='新写的首段') return '移出时丢失已输入的正文';
+            closeBlock(false,false);
+            if (state.body!=='\n\n新写的首段\n\n已有前导换行\n\n第二段。' ||
+                article.querySelector('p').textContent!=='新写的首段') return '新首段的保存或排版错误';
+            return true;
+          })()
+        """#)
+        guard leadingLineResult as? Bool == true, bridge.received?["action"] as? String == "change",
+              bridge.received?["value"] as? String == "新写的首段\n\n" else { throw Failure(String(describing:leadingLineResult)) }
+        print("正文首行通过：回车下移、悬停输入、移出收起与保存")
+        let lists = try await web.evaluateJavaScript(#"""
+          (() => {
+            let session=0;
+            const edit=(body,offset=body.length)=>render({file:'lists.md',editID:String(++session),
+              editOffset:offset,editable:true,body,marks:[],scroll:0});
+            const key=(key,shiftKey=false)=>activeBlock.field.dispatchEvent(new KeyboardEvent('keydown',{key,shiftKey,bubbles:true,cancelable:true}));
+            const type=text=>document.execCommand('insertText',false,text);
+            const check=(condition,message)=>{ if (!condition) throw Error(message+' / '+JSON.stringify(state.body)); };
+            const depth=()=>{let n=0; for(let el=activeBlock.holder;el;el=el.parentElement) if(el.matches('ul,ol')) n++; return n;};
+            for (const [marker,next] of [['- ','- '],['* ','* '],['+ ','+ '],['9. ','10. '],['1) ','2) ']]) {
+              edit('');
+              for (const char of marker) type(char);
+              check(depth()===1 && activeBlock.listPrefix===marker && activeBlock.field.value==='','输入符号未生成顶层列表');
+              type('第一项');
+              key('Enter');
+              check(depth()===1 && activeBlock.listPrefix===next && activeBlock.field.value==='','回车后新项未对齐');
+              const previous=activeBlock.holder.previousElementSibling;
+              const range=document.createRange();
+              range.selectNodeContents(previous);
+              const x=caretLayout.measure(activeBlock.field,at=>at(0).left);
+              check(Math.abs(x-range.getBoundingClientRect().left)<1.5,'新项编辑文字和上一项未对齐');
+              type('第二项');
+              key('Tab');
+              check(depth()===2,'Tab 未进入子级');
+              key('Enter');
+              check(depth()===2,'子项回车后层级改变');
+              type('第三项');
+              key('Tab',true);
+              check(depth()===1,'Shift+Tab 未减少一级');
+              key('Tab',true);
+              check(depth()===0 && activeBlock.field.value==='第三项' && activeBlock.field===document.activeElement,'顶层未恢复为可编辑正文');
+            }
+            for (const tail of ['', '\n', '\n\n后文']) {
+              const body='- 一\n  - 二'+tail;
+              edit(body,body.indexOf('二')+1);
+              key('Enter');
+              check(depth()===2 && activeBlock.listPrefix==='  - ' && activeBlock.field.value==='','空子项范围错误');
+              key('Tab',true);
+              check(depth()===1 && activeBlock.listPrefix==='- ' && activeBlock.field.value==='','空项反缩进失败');
+              type('三');
+              closeBlock(false,false);
+              check(state.body==='- 一\n  - 二\n- 三'+tail,'修改空项影响了邻文');
+            }
+            edit('  1. 原文');
+            key('Tab',true);
+            check(depth()===0 && activeBlock.field.value==='原文','带前导空格的顶层项需一次退出');
+            edit('- 原文\n  - 子项',4);
+            key('Enter');
+            check(state.body==='- 原文\n  - 子项\n- ' && depth()===1,'新增同级项改变了原有子项的归属');
+            type('1'); type('.'); type(' '); type('新项');
+            closeBlock(false,false);
+            check(state.body==='- 原文\n  - 子项\n1. 新项' && article.querySelector(':scope > ol > li')?.textContent==='新项','手动输入的编号未替换当前空项符号');
+            edit('1. 中芯国际');
+            key('Enter');
+            for (const ch of '2. 2. 华虹半导体') type(ch);
+            key('Enter'); type('-'); type(' '); type('圆点'); key('Tab');
+            check(depth()===2 && paragraphBody(activeBlock)==='1. 中芯国际\n2. 华虹半导体\n   - 圆点','重复输入编号或改圆点后产生多余层级');
+            key('Tab',true); key('Enter'); type('末项');
+            closeBlock(false,false);
+            check(state.body==='1. 中芯国际\n2. 华虹半导体\n3. 圆点\n4. 末项' && article.querySelectorAll('li').length===4,'退级未恢复编号');
+            return true;
+          })()
+        """#)
+        guard lists as? Bool == true else { throw Failure("列表编辑测试失败") }
+        print("列表通过：输入符号、同级回车、编辑文字对齐、缩进、退回正文和子项归属")
         if CommandLine.arguments.contains("--terminal") {
             let root=fm.temporaryDirectory.appendingPathComponent("Feynman-Smoke-" + UUID().uuidString)
             try fm.createDirectory(at:root,withIntermediateDirectories:true)

@@ -23,7 +23,11 @@
 article{min-height:100vh;cursor:text}article img{max-width:100%;height:auto}.empty-note{margin-top:12px;color:#65738a;cursor:text}
 
 .editing-block{position:relative;list-style:none;min-width:0}
-li:has(> .list-head){list-style:none}
+.leading-line,.leading-line:hover{display:block;width:100%;height:1.83em;min-height:28px;margin:0;padding:0;background:transparent;font:inherit;cursor:text}
+.editing-block.editing-list-item{list-style:inherit}
+li > .editing-block .paragraph-source,li.editing-list-item .paragraph-source{tab-size:4}
+li.typing-list-marker::marker{color:transparent}
+li.editing-list-item > textarea{display:inline-block;vertical-align:top}
 .paragraph-source{display:block;width:100%;min-height:1.83em;padding:0;border:0;outline:0;resize:none;overflow:hidden;background:transparent;color:inherit;font:inherit;line-height:inherit;overflow-wrap:anywhere;caret-color:#385b87}
 
 .paragraph-measure{position:absolute;top:0;left:0;width:100%;visibility:hidden;pointer-events:none;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:inherit}

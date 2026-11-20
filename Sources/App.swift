@@ -104,7 +104,7 @@ struct MainView: View {
                 }
             }
             VStack(spacing: 0) {
-                HStack(spacing: 12) {
+                HStack(spacing: 3) {
                     Button { sidebar.toggle() } label: { Image(systemName:"sidebar.left") }.help("切换大纲")
                     if model.project != nil {
                         Button { if model.canGoBack { model.navigate(.back) } else { model.home() } } label: { Image(systemName:"chevron.left") }.help(model.canGoBack ? "返回上一页" : "返回项目列表")
@@ -121,7 +121,7 @@ struct MainView: View {
                         Button { if model.displayedEntry != nil { model.showEntryRelations.toggle() } else { model.inspect.toggle() } } label: { Image(systemName:"sidebar.right") }.help("显示关联与出处")
                     }
                     Button { model.dialog = .settings } label: { Image(systemName:"gearshape") }.help("本机设置")
-                }.buttonStyle(.plain).foregroundStyle(leaf).padding(.horizontal,20).frame(height:48)
+                }.buttonStyle(ToolbarIconStyle()).foregroundStyle(leaf).padding(.horizontal,14).frame(height:48)
 
                 Divider()
                 VSplitView {
@@ -265,6 +265,15 @@ private struct PaneDivider: View {
     }
 }
 
+private struct ToolbarIconStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(width: 26, height: 26)
+            .contentShape(Rectangle())
+            .modifier(ButtonHighlight(selected: false, color: leaf, pressed: configuration.isPressed))
+    }
+}
+
 struct SidebarLinkStyle: ButtonStyle {
     var selected = false
     var color = leaf
@@ -278,19 +287,21 @@ struct SidebarLinkStyle: ButtonStyle {
             .padding(.horizontal, horizontalInset)
             .padding(.vertical, verticalInset)
             .contentShape(Rectangle())
-            .modifier(SidebarLinkFeedback(selected: selected, color: color, pressed: configuration.isPressed))
+            .modifier(ButtonHighlight(selected: selected, color: color, pressed: configuration.isPressed))
     }
 }
 
-private struct SidebarLinkFeedback: ViewModifier {
+private struct ButtonHighlight: ViewModifier {
     var selected: Bool
     var color: Color
     var pressed: Bool
+    @Environment(\.isEnabled) private var isEnabled
     @State private var hovered = false
 
     func body(content: Content) -> some View {
         let opacity = pressed ? 0.32 : selected ? (hovered ? 0.28 : 0.18) : (hovered ? 0.12 : 0)
-        content.background(color.opacity(opacity), in: RoundedRectangle(cornerRadius: 5))
+        content.opacity(isEnabled ? 1 : 0.4)
+            .background(color.opacity(isEnabled ? opacity : 0), in: RoundedRectangle(cornerRadius: 5))
             .onHover { hovered = $0 }
     }
 }
@@ -313,7 +324,11 @@ struct Sidebar: View {
         VStack(alignment:.leading,spacing:0) {
             HStack(spacing:9) { Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high).frame(width:32,height:32); Text("Feynman").font(.system(size:23,weight:.medium,design:.serif)).lineLimit(1).minimumScaleFactor(0.8) }.padding(.leading,18).padding(.top,17).padding(.bottom,20)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button { m.home(); m.refreshProjects() } label: { Label { Text("所有项目") } icon: { CategoryTag(category: .project, compact: true) } }.buttonStyle(SidebarLinkStyle(selected: m.project == nil, horizontalInset: 8, verticalInset: 8)).padding(.horizontal,10)
+            Button { m.home(); m.refreshProjects() } label: {
+                Label { Text("All Projects").bold() } icon: {
+                    Image(systemName: "house").foregroundStyle(PageCategory.project.color)
+                }
+            }.buttonStyle(SidebarLinkStyle(selected: m.project == nil, horizontalInset: 8, verticalInset: 8)).padding(.horizontal,10)
             Divider().padding(.vertical,8)
             if m.project != nil {
                 HStack(spacing: 4) {
@@ -363,14 +378,14 @@ struct Sidebar: View {
         }.font(.system(size:13))
     }
     @ViewBuilder private var outline: some View {
-        row("项目概览",.project,.overview)
+        row("Project Overview",.project,.overview)
         HStack(spacing: 2) {
             Button { toggle("reports") } label: {
                 Image(systemName: m.expanded.contains("reports") ? "chevron.down" : "chevron.right").frame(width: 12)
             }.buttonStyle(SidebarLinkStyle(fullWidth: false, horizontalInset: 2))
             Button { if let report = m.snapshot.reports.last { m.go(.doc(report)) } else { m.go(.overview) } } label: {
                 HStack {
-                    Label { Text("预研报告") } icon: { CategoryTag(category: .report, compact: true) }
+                    Label { Text("Preliminary") } icon: { CategoryTag(category: .report, compact: true) }
                     Spacer()
                     Text("\(m.snapshot.reports.count)").foregroundStyle(.secondary)
                 }

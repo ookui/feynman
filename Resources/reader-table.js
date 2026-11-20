@@ -8,7 +8,7 @@ const tableWidths = new Map();
 const blockHistory = {file:null, body:null, undo:[], redo:[]};
 
 function applyBlockSplice(step, restore) {
-  closeBlock(false,false);
+  closeBlock(false,false,false);
   const value = restore ? step.removed : step.value;
   const length = restore ? step.value.length : step.removed.length;
   const caret = restore ? step.restoreCaret : step.caret;

@@ -154,6 +154,12 @@ function sanitize(html) {
   template.innerHTML = html;
   const allowed = new Set('P BR HR H1 H2 H3 H4 H5 H6 UL OL LI STRONG EM B I S DEL CODE PRE BLOCKQUOTE TABLE THEAD TBODY TR TH TD A IMG SUP SUB'.split(' '));
   for (const el of Array.from(template.content.querySelectorAll('*'))) {
+    if (el.matches('li input[type=checkbox]')) {
+      const box = document.createElement('input');
+      box.type = 'checkbox'; box.checked = el.hasAttribute('checked'); box.disabled = true;
+      el.replaceWith(box);
+      continue;
+    }
     if (!allowed.has(el.tagName)) { el.replaceWith(document.createTextNode(el.textContent)); continue; }
     const imageRaw = el.tagName === 'IMG' && (el.getAttribute('data-image-markdown') || el.outerHTML);
     const href = el.getAttribute('href'), alt = el.getAttribute('alt'), src = el.getAttribute('src');
@@ -279,12 +285,21 @@ function paint(data, keepScroll = false) {
   const tokens = marked.lexer(data.body);
   documentLinks = tokens.links;
   let tableOrdinal = 0;
-  for (const token of tokens) {
-    const start = data.body.indexOf(token.raw, cursor);
+  for (let token of tokens) {
+    // Marked parses a lone "- " as prose, but the same empty marker within a
+    // list is an item. Give a freshly typed marker the same editable structure.
+    if (token.type === 'paragraph' && /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+\n?$/.test(token.raw)) {
+      token = marked.lexer(token.raw.trimEnd())[0];
+    }
+    // A list token can lose its final spaces or gain a newline at EOF. Match
+    // the stable part, then take the editable last line from the note itself.
+    const raw = token.type === 'list' ? token.raw.trimEnd() : token.raw;
+    const start = data.body.indexOf(raw, cursor);
     const block = sanitize(marked.Parser.parse([token]));
     if (start >= 0) {
-      cursor = start + token.raw.length;
-      const end = start + token.raw.replace(/\n+$/, '').length;
+      cursor = start + raw.length;
+      const end = token.type === 'list' ? cursor + data.body.slice(cursor).match(/^[ \t]*/)[0].length
+                                        : start + raw.replace(/\n+$/, '').length;
       // A raw HTML token may produce several siblings, or a bare text node.
       if (block.children.length > 1 || [...block.childNodes].some(n => n.nodeType === Node.TEXT_NODE && n.textContent.trim())) {
         const group = document.createElement('div');
@@ -302,7 +317,7 @@ function paint(data, keepScroll = false) {
             parts.forEach((part, i) => sourceBlocks.set(el.children[i], {start:start+part.index, end:start+part.index+part[0].length}));
           }
         }
-        if (token.type === 'list') mapListItems(el,token,token.raw,start);
+        if (token.type === 'list') mapListItems(el,token,data.body.slice(start,end),start);
       }
     }
     content.append(block);
@@ -397,15 +412,18 @@ function editorHasFocus(edit) {
   return edit.holder.contains(focused) || (edit.grid && !!focused?.closest('.sima-table-menu'));
 }
 function disposeBlock(edit) {
+  edit?.holder.closest('li')?.classList.remove('typing-list-marker');
+  edit?.leadingLines?.remove();
   edit?.observer?.disconnect();
   edit?.grid?.destroy();
 }
 function blockValue(edit) {
   if (edit.grid) return edit.raw;
   const text=edit.field.value;
-  return edit.afterTable && text ? '\n\n'+text+edit.suffix : text;
+  if (edit.beforeFirst) return text.trim() ? text + edit.suffix : '';
+  return edit.afterTable && text ? '\n\n'+text+edit.suffix : listSourcePrefix(edit) + text + (pendingListMark(edit) ? ' ' : '');
 }
-function fieldStart(edit) { return edit.start + (edit.afterTable && edit.field.value ? 2 : 0); }
+function fieldStart(edit) { return edit.start + listSourcePrefix(edit).length + (edit.afterTable && edit.field.value ? 2 : 0); }
 function blockCaret(edit) {
   return edit.grid ? edit.start+edit.caret : fieldStart(edit)+edit.field.selectionEnd;
 }
@@ -416,7 +434,7 @@ function editableSpan(el) {
 function mappedBlocks(includeNested = false) {
   return [...article.querySelectorAll('*')].filter(el => {
     if (!includeNested) return sourceBlocks.has(el);
-    if (listItems.get(el)?.sublistStarts || (el.matches('ol,ul') && listItems.has(el.firstElementChild))) return false;
+    if ((listItems.has(el) && !listParts.has(el)) || listRoots.has(el)) return false;
     return !!editableSpan(el);
   });
 }
@@ -433,14 +451,17 @@ function flushField(edit, composing = false) {
   }
   edit.composing = composing;
 }
-function closeBlock(done = false, notify = true) {
+function closeBlock(done = false, notify = true, rememberTyping = true) {
   const edit = activeBlock;
   if (!edit) return;
   flushField(edit);
   const caret = blockCaret(edit);
+  if (rememberTyping && edit.list) rememberListTyping(edit,caret);
   activeBlock = null;
   disposeBlock(edit);
-  if (blockValue(edit) === state.body.slice(edit.start,edit.end) && !edit.synthetic) {
+  if (edit.beforeFirst && !blockValue(edit)) {
+    edit.holder.remove();
+  } else if (blockValue(edit) === state.body.slice(edit.start,edit.end) && !edit.synthetic) {
     edit.holder.replaceWith(edit.original);
   } else {
     paint({...state, body:paragraphBody(edit)}, true);
@@ -461,9 +482,9 @@ function openBlockAt(offset, targetY = null, target = null) {
     recordBlockSplice(target.deletion);
     return;
   }
-  const afterTable=target?.afterTable===true;
+  const afterTable=target?.afterTable===true, beforeFirst=target?.beforeFirst===true;
   // The innermost match selects a single list item, even when its parent covers the same offset.
-  let el = mappedBlocks(true).filter(node => {
+  let el = beforeFirst ? null : mappedBlocks(true).filter(node => {
     const {start,end} = editableSpan(node);
     return start <= offset && offset <= end;
   }).pop();
@@ -477,7 +498,8 @@ function openBlockAt(offset, targetY = null, target = null) {
   let span = afterTable ? {start:offset,end:offset} : el && editableSpan(el);
   if (!el) {
     el = document.createElement('div');
-    const next = [...article.children].find(node => sourceBlocks.get(node)?.start > offset || node.matches('details'));
+    const next = beforeFirst ? article.firstChild :
+      [...article.children].find(node => sourceBlocks.get(node)?.start > offset || node.matches('details'));
     article.insertBefore(el, next ?? null);
     span = {start:offset, end:offset};
   }
@@ -497,9 +519,10 @@ function openBlockAt(offset, targetY = null, target = null) {
   }
   holder.append(field);
   const part=listParts.get(el);
-  if (part?.leading) holder.classList.add('list-head');
-  const edit = {field, holder, original:el, synthetic, start:span.start, end:span.end,
+
+  const edit = {field, holder, original:el, synthetic, beforeFirst, start:span.start, end:span.end,
     tag:part?.leading ? 'LI' : el.tagName, sent:field.value, composing:false};
+  if (beforeFirst) edit.suffix = state.body.slice(span.start).trim() ? '\n\n' : '';
   if (afterTable) {
     // Keep the insertion line out of the note until it has content. Existing line
     // endings stay attached to the following block (or to the end of the file).
@@ -510,6 +533,16 @@ function openBlockAt(offset, targetY = null, target = null) {
   }
   activeBlock = edit;
   el.replaceWith(holder);
+  if (part) {
+    edit.entryCaret = offset;
+    edit.list = part.node;
+    if (part.leading) {
+      edit.listPrefix = part.node.prefix;
+      field.value = field.value.slice(edit.listPrefix.length);
+      edit.acceptMarker = !field.value.trim();
+      if (holder.tagName === 'LI') holder.classList.add('editing-list-item');
+    }
+  }
   const resize = () => {
     field.style.height = '0px';
     field.style.height = Math.max(28, field.scrollHeight) + 'px';
@@ -521,17 +554,27 @@ function openBlockAt(offset, targetY = null, target = null) {
   edit.observer.observe(holder);
   resize();
   field.focus({preventScroll:true});
-  const caret = Math.min(field.value.length, Math.max(0, offset - span.start));
+  const caret = Math.min(field.value.length, Math.max(0, offset - fieldStart(edit)));
   field.setSelectionRange(caret, caret);
+  edit.atSourceStart = offset === edit.start && caret === 0;
   if (targetY != null) {
     const rect = caretLayout.measure(field, at => at(caret));
     scrollBy(0, rect.top + rect.height / 2 - targetY);
   }
   field.oninput = event => {
+    edit.atSourceStart = false;
+    if (listInput(edit,event)) return;
     resize();
     flushField(edit, event.isComposing);
+    if (!event.isComposing && !edit.composing && edit.tag!=='LI' && !listParts.has(el) &&
+        /^(P|DIV|BUTTON)$/.test(edit.tag) && /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/.test(field.value)) {
+      const at=blockCaret(edit);
+      closeBlock(false,false);
+      openBlockAt(at);
+      return;
+    }
     // A multiline paste may introduce several complete paragraphs in one native input event.
-    if (!event.isComposing && field.value.includes('\n') && (/\n\s*\n/.test(field.value) || field.value.includes('|'))) queueMicrotask(() => {
+    if (!event.isComposing && !edit.list && field.value.includes('\n') && (/\n\s*\n/.test(field.value) || field.value.includes('|'))) queueMicrotask(() => {
       if (activeBlock !== edit || edit.composing) return;
       const blocks = marked.lexer(field.value).filter(token => token.type !== 'space' && token.type !== 'def');
       if (blocks.length < 2 && blocks[0]?.type !== 'table') return;
@@ -541,6 +584,9 @@ function openBlockAt(offset, targetY = null, target = null) {
     });
   };
   field.oncompositionend = () => flushField(edit);
+  if (beforeFirst) holder.onpointerleave = () => {
+    if (activeBlock === edit && !blockValue(edit) && !edit.composing) requestBlock(edit.start);
+  };
   // WebKit can move focus while undo restores a paragraph separator. Let the
   // input handler finish rebuilding and focusing the restored block first.
   field.onblur = () => setTimeout(() => {
@@ -586,6 +632,14 @@ async function pasteIntoBlock(edit, fallback, html) {
       if (tokens[0]?.type === 'table' && before.slice(0,start).trim()) text = '\n\n' + text;
       if (tokens.at(-1)?.type === 'table' && before.slice(end).trim()) text += '\n\n';
     }
+    if (edit.listPrefix) {
+      const pasted = clipboardList(text);
+      if (pasted && !before.slice(start,end).includes('\n') && !before.slice(0,start).includes('\n')) {
+        editListCommand(edit,'paste',pasted);
+        return;
+      }
+      if (text.includes('\n')) text = text.replace(/\n(?=[^\n])/g,'\n'+' '.repeat(edit.list.content));
+    }
     if (field !== focus) return;
     field.setSelectionRange(start,end);
     document.execCommand('insertText', false, text);
@@ -594,16 +648,41 @@ async function pasteIntoBlock(edit, fallback, html) {
 function requestBlock(offset, y = null, target = null) {
   if (state?.editable === false) return;
   if (activeBlock) {
-    if (offset > activeBlock.end || (offset === activeBlock.end && !activeBlock.afterTable)) offset += blockValue(activeBlock).length - (activeBlock.end - activeBlock.start);
+    if (offset > activeBlock.end || (offset === activeBlock.end && !activeBlock.afterTable && !target?.beforeFirst)) offset += blockValue(activeBlock).length - (activeBlock.end - activeBlock.start);
     closeBlock(false, false);
     openBlockAt(offset,y,target);
   } else { pendingClick = {file,offset,y,target}; send({action:'edit', offset, y}); }
 }
 
+// The blank row is a view until the user types in it. Keep the original
+// paragraph focused so Return leaves its caret with the text that moved down.
+function showLeadingLine(edit) {
+  if (!edit.leadingLines?.isConnected) {
+    edit.leadingLines = document.createElement('div');
+    article.prepend(edit.leadingLines);
+  }
+  const line = document.createElement('button');
+  line.type = 'button';
+  line.className = 'leading-line';
+  line.setAttribute('aria-label', '在正文首行输入');
+  const activate = () => {
+    if (activeBlock === edit && !edit.composing) requestBlock(edit.start, null, {beforeFirst:true});
+  };
+  // A layout change alone can fire pointerenter underneath a stationary pointer.
+  line.onpointermove = activate;
+  line.onclick = activate;
+  line.onpointerleave = () => line.remove();
+  edit.leadingLines.append(line);
+}
+
 function moveToNeighbor(edit, direction, x = null) {
+  if (direction < 0 && edit.leadingLines?.childElementCount) {
+    requestBlock(edit.start, null, {beforeFirst:true});
+    return true;
+  }
   const back = direction < 0, blocks = mappedBlocks(true);
   const next = back ? blocks.filter(el => editableSpan(el).end < edit.start || (edit.afterTable && editableSpan(el).end===edit.start)).at(-1)
-                    : blocks.find(el => editableSpan(el).start > edit.end);
+                    : blocks.find(el => editableSpan(el).start > edit.end || (edit.beforeFirst && editableSpan(el).start === edit.end));
   if (!next) return false;
   const span = editableSpan(next);
   let cell = null;
@@ -626,7 +705,7 @@ function joinParagraph(edit, back) {
   if (edit.afterTable && (back || !edit.field.value)) return false;
   const blocks = mappedBlocks(true);
   const adjacent = back ? blocks.filter(node => editableSpan(node).end < edit.start).at(-1)
-                        : blocks.find(node => editableSpan(node).start > edit.end);
+                        : blocks.find(node => editableSpan(node).start > edit.end || (edit.beforeFirst && editableSpan(node).start === edit.end));
   // Keep structural blocks (in particular a table's last cell and code fences) intact.
   if (!adjacent || tableSources.has(adjacent) || adjacent.matches('pre,hr') || edit.tag === 'PRE') return false;
   const neighbor = editableSpan(adjacent);
@@ -660,23 +739,47 @@ function handleBlockKey(event, edit) {
     event.preventDefault(); closeBlock(true); return;
   }
   if (event.metaKey || event.ctrlKey || event.altKey) return;
-  const marker = edit.tag === 'LI' && /^([ \t]*)([-*+]|(\d+)([.)]))([ \t]+)(?:\[[xX ]\] )?/.exec(field.value);
-  if (key === 'Tab' && (edit.tag==='LI' || listParts.has(edit.original) || listMarker.test(field.value))) {
+  if (key === 'Enter' && !event.shiftKey && !edit.afterTable &&
+      field.selectionStart === 0 && field.selectionEnd === 0 && !state.body.slice(0,edit.start).trim() && (!edit.list || edit.atSourceStart)) {
     event.preventDefault();
-    indentEditingItem(edit,event.shiftKey);
+    if (edit.beforeFirst) {
+      closeBlock(false,false);
+      openBlockAt(edit.start);
+    }
+    showLeadingLine(activeBlock);
     return;
   }
-  if (key === 'Enter' && !event.shiftKey && (marker || /^(P|H[1-6]|BUTTON|DIV)$/.test(edit.tag))) {
-    // Insert the separator into the real Markdown before handing the caret to the new paragraph.
+  if (key === 'Backspace' && edit.leadingLines?.childElementCount && field.selectionStart === 0 && field.selectionEnd === 0) {
     event.preventDefault();
-    let separator = '\n\n';
-    if (marker && field.value.slice(marker[0].length).trim()) {
-      const bullet = marker[3] ? (Number(marker[3])+1) + marker[4] : marker[2];
-      separator = '\n' + marker[1] + bullet + marker[5] + (/\[[ xX]\] $/.test(marker[0]) ? '[ ] ' : '');
-    } else if (marker) field.select();
-    document.execCommand('insertText', false, separator);
+    edit.leadingLines.lastElementChild.remove();
+    return;
+  }
+  if (edit.list) {
+    if (key === 'Tab' || key === 'Enter') {
+      event.preventDefault();
+      if (key === 'Enter' && !event.shiftKey && pendingListMark(edit)) {
+        const typed = listMarker.exec(field.value);
+        field.setRangeText('',0,field.value.length,'end');
+        editListCommand(edit,'marker',typed);
+      } else if (key === 'Enter' && event.shiftKey) {
+        document.execCommand('insertText',false,'  \n'+' '.repeat(edit.list.content));
+      } else {
+        editListCommand(edit,key === 'Enter' ? 'enter' : event.shiftKey ? 'outdent' : 'indent');
+      }
+      return;
+    }
+    if (edit.listPrefix && field.selectionStart === field.selectionEnd &&
+        ((key === 'Backspace' && field.selectionStart === 0) || (key === 'Delete' && field.selectionStart === field.value.length))) {
+      event.preventDefault();
+      editListCommand(edit,key === 'Backspace' ? 'backspace' : 'delete');
+      return;
+    }
+  }
+  if (key === 'Enter' && !event.shiftKey && /^(P|H[1-6]|BUTTON|DIV)$/.test(edit.tag)) {
+    event.preventDefault();
+    document.execCommand('insertText',false,'\n\n');
     const at = blockCaret(edit);
-    closeBlock(false, false);
+    closeBlock(false,false);
     openBlockAt(at);
     return;
   }
@@ -731,7 +834,10 @@ function highlightTableLine(line) {
   line?.classList.add('in-table-gap');
 }
 article.addEventListener('pointermove', event => highlightTableLine(tableLineInGap(event)));
-article.addEventListener('pointerleave', () => highlightTableLine(null));
+article.addEventListener('pointerleave', () => {
+  highlightTableLine(null);
+  activeBlock?.leadingLines?.remove();
+});
 article.addEventListener('click', event => {
   if (event.target.closest('.editing-block')) return;
   const link = event.target.closest('a');

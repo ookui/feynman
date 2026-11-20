@@ -18,7 +18,7 @@ enum Kind: String, CaseIterable, Codable, Identifiable {
     }
     var englishLabel: String {
         switch self {
-        case .questions: return "Key Qs"
+        case .questions: return "KeyQs"
         case .concepts: return "Concepts"
         case .entities: return "Entities"
         case .events: return "Events"
