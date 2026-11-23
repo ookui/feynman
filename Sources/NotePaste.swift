@@ -294,6 +294,19 @@ enum NotePaste {
     }
 
     static func storeImage(_ data: Data, name: String, note: URL) throws -> String {
+        imageMarkdown(name, try storeImageFile(data, name: name, note: note))
+    }
+
+    static func storeImageFile(_ data: Data, name: String, note: URL) throws -> String {
+        let folder = try Files.child(note.deletingLastPathComponent(), "assets")
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        if (name as NSString).pathExtension.lowercased() == "svg",
+           let xml = try? XMLDocument(data: data, options: [.nodeLoadExternalEntitiesNever]),
+           xml.rootElement()?.localName == "svg" {
+            let filename = UUID().uuidString.lowercased() + ".svg"
+            try data.write(to: Files.child(folder, filename), options: .withoutOverwriting)
+            return "assets/" + filename
+        }
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let identifier = CGImageSourceGetType(source) as String?, let type = UTType(identifier) else {
             throw Failure("无法读取剪贴板中的图片。")
@@ -309,10 +322,8 @@ enum NotePaste {
             bytes = png
             ext = "png"
         }
-        let folder = try Files.child(note.deletingLastPathComponent(), "assets")
-        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
         let filename = UUID().uuidString.lowercased() + "." + ext
         try bytes.write(to: Files.child(folder, filename), options: .withoutOverwriting)
-        return imageMarkdown(name, "assets/" + filename)
+        return "assets/" + filename
     }
 }

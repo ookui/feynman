@@ -14,11 +14,11 @@ enum Kind: String, CaseIterable, Codable, Identifiable {
     case questions, concepts, entities, events, references
     var id: String { rawValue }
     var label: String {
-        switch self { case .questions: return "关键问题"; case .concepts: return "概念"; case .entities: return "实体"; case .events: return "事件"; case .references: return "参考资料" }
+        switch self { case .questions: return "Inquiries"; case .concepts: return "概念"; case .entities: return "实体"; case .events: return "事件"; case .references: return "参考资料" }
     }
     var englishLabel: String {
         switch self {
-        case .questions: return "KeyQs"
+        case .questions: return "Inquiries"
         case .concepts: return "Concepts"
         case .entities: return "Entities"
         case .events: return "Events"
@@ -93,6 +93,7 @@ struct Entry: Identifiable, Hashable {
     var retiredAssets: [String] = []
     var aliases: [String] = []
     var deleted = false
+    var core = false
     var answered = false
     var questionHistory: [ResearchTurn] = []
     var path: String
@@ -124,6 +125,7 @@ struct Entry: Identifiable, Hashable {
         archivedSources = decode([String: String].self, doc.fields["archived_sources"]) ?? [:]
         aliases = decode([String].self, doc.fields["aliases"]) ?? []
         deleted = doc.string("deleted") == "true"
+        core = doc.string("core") == "true"
         answered = doc.string("answered") == "true"
         questionHistory = decode([ResearchTurn].self, doc.fields["question_history"]) ?? []
         self.path = path; original = raw
@@ -151,6 +153,7 @@ struct Entry: Identifiable, Hashable {
         if !downloadedPDFs.isEmpty { fields["downloaded_pdfs"] = try json(downloadedPDFs) }
         if !archivedSources.isEmpty || fields["archived_sources"] != nil { fields["archived_sources"] = try json(archivedSources) }
         if !questionHistory.isEmpty || fields["question_history"] != nil { fields["question_history"] = try json(questionHistory) }
+        if core { fields["core"] = "true" } else { fields.removeValue(forKey: "core") }
         fields["aliases"] = try json(aliases); fields["deleted"] = String(deleted); fields["answered"] = String(answered)
         return "---\n" + fields.keys.sorted().map { "\($0): \(fields[$0]!)" }.joined(separator: "\n") + "\n---\n" + body
     }
@@ -457,6 +460,7 @@ enum Files {
     }
     private static func saveMerged(_ source: Entry, into target: Entry, at root: URL) throws {
         var e = target
+        e.core = e.core || source.core
         e.aliases += ([source.id] + source.aliases).filter { !e.aliases.contains($0) }
         e.anchors += source.anchors.filter { !e.anchors.contains($0) }
         e.links += source.links.filter { !e.links.contains($0) }

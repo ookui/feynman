@@ -1,0 +1,59 @@
+.sima-file-preview {
+  margin: 14px auto;
+  width: calc(100% - 40px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: 13px/1.5 var(--body-font, system-ui);
+}
+.sima-file-preview > summary { padding: 8px 12px; cursor: pointer; color: var(--muted); }
+.sima-file-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 12px 10px; }
+.sima-file-preview button { font: inherit; color: inherit; cursor: pointer; }
+.sima-file-tools button, .sima-file-body > button {
+  padding: 3px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+}
+.sima-file-status { color: var(--muted); overflow-wrap: anywhere; }
+.sima-file-body { padding: 12px; overflow: auto; max-height: 55vh; border-top: 1px solid var(--border); }
+.sima-graphic-body {
+  box-sizing: border-box; height: 45vh; min-height: 180px; max-height: 75vh; resize: vertical;
+  background: var(--bg);
+}
+.sima-graphic-image[data-zoom-cursor="in"] { cursor: zoom-in; }
+.sima-graphic-image[data-zoom-cursor="out"] { cursor: zoom-out; }
+.sima-graphic-image.dragging, .sima-graphic-image[data-zoom-cursor]:active { cursor: grabbing; }
+.sima-graphic-image { cursor: grab; user-select: none; touch-action: none; display: block; max-width: none; margin: auto; }
+.sima-graphic-body { overscroll-behavior: contain; }
+.sima-graphic-dialog {
+  box-sizing: border-box; width: calc(100vw - 64px); height: calc(100vh - 64px);
+  max-width: none; max-height: none; padding: 16px; margin: auto;
+  border: 1px solid var(--border); border-radius: 12px;
+  color: var(--text); background: var(--surface); font: 13px/1.5 var(--body-font, system-ui);
+  box-shadow: 0 20px 70px #0005;
+}
+.sima-graphic-dialog[open] { display: flex; flex-direction: column; gap: 10px; }
+.sima-graphic-dialog::backdrop { background: #0007; }
+.sima-graphic-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.sima-graphic-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sima-graphic-heading button { flex-shrink: 0; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); padding: 4px 10px; }
+.sima-graphic-hint { color: var(--muted); }
+.sima-graphic-dialog .sima-file-tools { padding: 0; }
+.sima-graphic-dialog .sima-graphic-body { flex: 1; height: auto; min-height: 0; max-height: none; resize: none; border: 1px solid var(--border); border-radius: 6px; }
+.sima-json-children { padding-inline-start: 20px; border-inline-start: 1px solid var(--border); }
+.sima-json-branch > summary { cursor: pointer; padding: 3px; font-family: var(--monospace, monospace); }
+.sima-json-leaf {
+  display: block; text-align: start; white-space: pre-wrap; overflow-wrap: anywhere;
+  border: 0; background: transparent; padding: 3px; max-width: 100%;
+  font-family: var(--monospace, monospace) !important;
+}
+.sima-file-preview .sima-json-string { color: var(--link); }
+.sima-file-preview .sima-json-number { color: var(--accent); }
+.sima-file-preview .sima-json-boolean, .sima-file-preview .sima-json-null { color: var(--muted); }
+.sima-json-leaf:hover, .sima-csv-table button:hover { background: var(--selection); }
+.sima-csv-table { border-collapse: collapse; width: max-content; min-width: 100%; }
+.sima-csv-table th, .sima-csv-table td { border: 1px solid var(--border); vertical-align: top; }
+.sima-csv-table th { position: sticky; left: -12px; background: var(--surface); color: var(--muted); padding: 5px 8px; }
+.sima-csv-table button { border: 0; background: transparent; display: block; padding: 5px 8px; text-align: start; white-space: pre-wrap; min-width: 60px; max-width: 380px; overflow-wrap: anywhere; }
+.sima-token-json-key { color: var(--accent); font-weight: 600; }
+.sima-token-json-string { color: var(--link); }
+.sima-token-json-number, .sima-token-json-literal { color: var(--accent); }

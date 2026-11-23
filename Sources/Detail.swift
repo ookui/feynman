@@ -3,14 +3,15 @@ import SwiftUI
 struct ProjectDetail: View {
     @ObservedObject var m: Workspace
     var p: ProjectAt
-    func jump(_ title: String,_ image:String,_ dest:Place, _ subtitle:String = "", color: Color = leaf) -> some View {
+    func jump(_ title: String,_ image:String,_ dest:Place, _ subtitle:String = "", color: Color = leaf, core: Bool = false) -> some View {
         Button { m.go(dest) } label: {
-            HStack(spacing:10) { Image(systemName:image).foregroundStyle(leaf).frame(width:20); Text(title).lineLimit(2); Spacer(); if !subtitle.isEmpty { Text(subtitle).font(.caption).foregroundStyle(.secondary) }; Image(systemName:"chevron.right").font(.caption2).foregroundStyle(.secondary) }.padding(.vertical,7).contentShape(Rectangle())
+            HStack(spacing:10) { Image(systemName:image).foregroundStyle(leaf).frame(width:20); Text(title).fontWeight(core ? .bold : .regular).lineLimit(2); Spacer(); if !subtitle.isEmpty { Text(subtitle).font(.caption).foregroundStyle(.secondary) }; Image(systemName:"chevron.right").font(.caption2).foregroundStyle(.secondary) }.padding(.vertical,7).contentShape(Rectangle())
         }.buttonStyle(SidebarLinkStyle(color: color, horizontalInset: 4, verticalInset: 0))
     }
     @ViewBuilder var body: some View {
         switch m.place {
         case .overview: overview
+        case .preliminary: preliminary
         case .group(.references): ReferenceDirectory(m: m)
         case .webLinks: ReferencePage(m: m)
         case .group(let k): group(k)
@@ -26,29 +27,61 @@ struct ProjectDetail: View {
         }
     }
     var overview: some View {
-        ScrollView { VStack(alignment:.leading,spacing:18) {
-            PageHeading(title: p.info.title, category: .project,
-                        metadata: m.snapshot.completed ? "预研已完成" : m.snapshot.reports.isEmpty ? "待预研" : "已有报告",
-                        subtitle: p.info.intent) {
-                PageActions {
+        VStack(spacing: 0) {
+            PageHeading(title: "Project Overview", category: .project) { EmptyView() }
+            ScrollView(.horizontal) {
+                HStack(spacing: 6) {
+                    overviewButton("Preliminary", .report, .preliminary)
+                    ForEach(Kind.allCases) { kind in
+                        overviewButton(kind.englishLabel, .kind(kind), .group(kind))
+                    }
+                    overviewButton("Log", .log, .doc("log.md"))
+                    overviewButton("Memo", .memo, .doc("memo.md"))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            Divider()
+            ProjectGraph(model: m)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func overviewButton(_ title: String, _ category: PageCategory, _ destination: Place) -> some View {
+        Button { m.go(destination) } label: {
+            Text(title).font(.system(size: 12, weight: .medium)).fixedSize()
+        }
+        .buttonStyle(.bordered)
+        .tint(category.color)
+    }
+
+    private var preliminary: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                PageHeading(title: "Preliminary", category: .report,
+                            metadata: m.snapshot.completed ? "预研已完成" : m.snapshot.reports.isEmpty ? "待预研" : "已有报告",
+                            subtitle: p.info.intent) {
                     Button { m.researchProject() } label: {
                         Label(m.hasPreflight ? "继续研究此项目…" : "开始预研", systemImage: "terminal")
                     }
                     .buttonStyle(ResearchActionStyle())
-                    if let report = m.snapshot.reports.last { Button("阅读最新报告") { m.go(.doc(report)) } }
                 }
+                VStack(alignment: .leading, spacing: 8) {
+                    if m.snapshot.reports.isEmpty {
+                        Text("本项目尚无预研报告。").foregroundStyle(.secondary)
+                    }
+                    ForEach(m.snapshot.reports.reversed(), id: \.self) { path in
+                        jump(documentLabel(path), "doc.text", .doc(path), color: PageCategory.report.color)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
             }
-            VStack(alignment: .leading, spacing: 18) {
-                let questions = m.snapshot.entries.filter { $0.kind == .questions }
-                HStack { Text("待回答的问题").font(.headline); Spacer(); Button { m.dialog = .editor(Editor(entry:Entry(kind:.questions,title:""))) } label:{ Image(systemName:"plus") }.buttonStyle(.plain) }
-                if questions.filter({ !$0.answered }).isEmpty { Text(questions.isEmpty ? "可在预研时提取问题，也可以在这里先记下一题。" : "当前问题均已回答。").foregroundStyle(.secondary) }
-                ForEach(questions.filter { !$0.answered }) { e in jump(e.title,"questionmark.circle",.entry(e.id)) }
-                Divider().padding(.vertical,5)
-                Text("项目文档").font(.headline)
-                ForEach(m.snapshot.documents + ["memo.md","log.md"],id:\.self) { path in jump(documentLabel(path),"doc.text",.doc(path)) }
-            }.padding(.horizontal,24).padding(.bottom,24).frame(maxWidth:850,alignment:.leading)
-        }.frame(maxWidth:.infinity,alignment:.leading) }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
+
     func group(_ k: Kind) -> some View {
         ScrollView { VStack(alignment:.leading,spacing:14) {
             PageHeading(title: k.label, category: .kind(k)) {
@@ -60,7 +93,7 @@ struct ProjectDetail: View {
                 ForEach(entries) { e in
                     VStack(alignment: .leading, spacing: 3) {
                         HStack {
-                            jump(e.title, k.symbol, .entry(e.id), e.origin, color: PageCategory.kind(k).color)
+                            jump(e.title, k.symbol, .entry(e.id), e.origin, color: PageCategory.kind(k).color, core: e.core).contextMenu { EntryActions(m: m, entry: e) }
                             if k == .questions { QuestionStatusButton(m: m, question: e) }
                         }
                         Divider()
@@ -102,7 +135,8 @@ struct ProjectDetail: View {
                 }
                 Button("关联…") { m.dialog = .relate(e) }
                 Menu("更多") {
-                    if e.kind != .questions { Button("用 Codex 修订正文") { m.launch(.revise, context:e.path) } }
+                    Button(e.core ? "取消核心标记" : "标为核心条目") { m.toggleCore(e) }
+                    if e.kind != .questions { Button("用 AI 修订正文") { m.launch(.revise, context:e.path) } }
                     if e.kind == .questions {
                         Button("添加子问题…") {
                             var question = Entry(kind:.questions,title:"")
@@ -130,7 +164,7 @@ struct ProjectDetail: View {
         PageActions {
             if path == "memo.md", !body.clean.isEmpty { Button("回写到知识库…") { m.launch(.publish,context:path) } }
             if path.hasPrefix("reports/") {
-                Button("用 Codex 修订报告") { m.launch(.revise, context:path) }
+                Button("用 AI 修订报告") { m.launch(.revise, context:path) }
                 Button("查看出处") { m.inspect.toggle() }
             }
         }

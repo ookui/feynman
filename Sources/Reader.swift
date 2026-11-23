@@ -10,8 +10,13 @@ struct ReaderData: Codable, Equatable {
     var file: String; var body: String; var marks: [Mark]; var focus: Anchor?; var extract: Bool; var scroll: Double
     var deletedIDs: [String]; var deletedPaths: [String]; var fragment: String?
     var questionHistory: [ResearchTurn]?
+    var searchLanding: SearchOccurrence?
+    var searchNavigation: UUID?
     var sourceOffset: Int?
     var editID: UUID?
+    var initialCommand: String?
+    var viewportY: Double?
+    var selectionLength: Int?
     var editOffset: Int?
     var editable: Bool?
     var doubleClickDelay: Double?
@@ -31,6 +36,7 @@ struct Reader: NSViewRepresentable {
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "notePaste")
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "tableCopy")
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "selectionClipboard")
+        config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "imageImport")
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
         if let url = Bundle.main.url(forResource: "reader", withExtension: "html") { web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent()) }
@@ -42,16 +48,24 @@ struct Reader: NSViewRepresentable {
         let scroll = bridge.data?.file == path ? bridge.data!.scroll : UserDefaults.standard.double(forKey: bridge.scrollKey(path))
         let editable = allowsEditing && model.canEditNote(path)
         let note = model.inlineNote.flatMap { editable && $0.path == path && $0.mode != .title ? $0 : nil }
+        model.readerWeb = web
+        let rich = note?.mode == .rich
+        if bridge.rich != rich {
+            bridge.ready = false; bridge.rich = rich
+            if let url = Bundle.main.url(forResource: rich ? "markdown" : "reader", withExtension: "html") { web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent()) }
+        }
         let data = ReaderData(file: path, body: bodyText, marks: marks, focus: model.focus, extract: extract, scroll: scroll,
                               deletedIDs: model.snapshot.deletedIDs.sorted(), deletedPaths: model.snapshot.deletedPaths.sorted(), fragment: model.headingFragment, questionHistory: questionHistory,
+                              searchLanding: model.searchLanding.flatMap { $0.path == path ? $0 : nil }, searchNavigation: model.searchNavigation,
                               sourceOffset: model.readingPosition.flatMap { $0.path == path ? $0.offset : nil },
-                              editID: note?.id, editOffset: note?.caret,
+                              editID: note?.id, initialCommand: note?.initialCommand, viewportY: note?.viewportY, selectionLength: note?.selectionLength, editOffset: note?.caret,
                               editable: editable, doubleClickDelay: NSEvent.doubleClickInterval * 1000)
         if bridge.data != data { bridge.data = data; bridge.render(web) }
     }
     static func dismantleNSView(_ web: WKWebView, coordinator: Bridge) {
         coordinator.imagePreview?.close()
         let controller = web.configuration.userContentController
+        controller.removeScriptMessageHandler(forName: "imageImport", contentWorld: .page)
         controller.removeScriptMessageHandler(forName: "selectionClipboard", contentWorld: .page)
         controller.removeScriptMessageHandler(forName: "reader")
         controller.removeScriptMessageHandler(forName: "notePaste", contentWorld: .page)
@@ -59,6 +73,7 @@ struct Reader: NSViewRepresentable {
     }
     @MainActor final class Bridge: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKScriptMessageHandlerWithReply, WKURLSchemeHandler {
         let model: Workspace; var data: ReaderData?; var ready = false
+        var rich = false
         var imagePreview: ReaderImagePanel?
         init(_ model: Workspace) { self.model = model }
         @objc func openItem(_ sender: NSMenuItem) {
@@ -74,12 +89,14 @@ struct Reader: NSViewRepresentable {
             guard let path = data?.file, request.scheme == "feynman-image", request.host == "local",
                   let parts = URLComponents(url: request, resolvingAgainstBaseURL: false)?.queryItems,
                   parts.first(where: { $0.name == "file" })?.value == path,
-                  let relative = parts.first(where: { $0.name == "src" })?.value?.removingPercentEncoding,
+                  let encoded = parts.first(where: { $0.name == "src" })?.value,
+                  let relative = encoded.removingPercentEncoding,
                   !relative.hasPrefix("/"), URL(string: relative)?.scheme == nil else { throw Failure("图片路径无效。") }
             let directory = try model.documentURL(path).deletingLastPathComponent()
             let image = directory.appendingPathComponent(relative).standardizedFileURL.resolvingSymlinksInPath()
             let key = try model.documentKey(for: image)
             if key.hasPrefix("lakehouse:"), !path.hasPrefix("lakehouse:") { throw Failure("图片超出工作目录。") }
+            if image.pathExtension.lowercased() == "svg" { return (image,"image/svg+xml") }
             guard let type = UTType(filenameExtension: image.pathExtension), type.conforms(to: .image),
                   let source = CGImageSourceCreateWithURL(image as CFURL, nil),
                   let identifier = CGImageSourceGetType(source) as String?,
@@ -99,12 +116,24 @@ struct Reader: NSViewRepresentable {
         func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            decisionHandler(action.request.url == Bundle.main.url(forResource: "reader", withExtension: "html") ? .allow : .cancel)
+            decisionHandler(action.request.url == Bundle.main.url(forResource: rich ? "markdown" : "reader", withExtension: "html") ? .allow : .cancel)
         }
 
         var pasteboard: NSPasteboard = .general
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage,
                                    replyHandler: @escaping (Any?, String?) -> Void) {
+            if message.name == "imageImport" {
+                guard message.frameInfo.isMainFrame, let m = message.body as? [String: Any], let file = m["file"] as? String,
+                      file == data?.file, data?.editable == true, model.canEditNote(file),
+                      let name = m["name"] as? String, let encoded = m["data"] as? String, let bytes = Data(base64Encoded: encoded) else {
+                    replyHandler(nil, "无法导入图片。"); return
+                }
+                do {
+                    let path = try NotePaste.storeImageFile(bytes, name: name, note: model.documentURL(file))
+                    replyHandler(["path":path, "markdown":NotePaste.imageMarkdown(name, path)], nil)
+                } catch { replyHandler(nil, error.localizedDescription) }
+                return
+            }
             if message.name == "selectionClipboard" {
                 guard message.frameInfo.isMainFrame, let m = message.body as? [String: Any],
                       let path = m["file"] as? String, data?.file == path, data?.editable == true,
@@ -154,6 +183,31 @@ struct Reader: NSViewRepresentable {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame, let m = message.body as? [String:Any], let path = m["file"] as? String, data?.file == path else { return }
             switch m["action"] as? String {
+            case "error": model.error = m["message"] as? String
+            case "rich":
+                guard data?.editable == true, let start = m["start"] as? Int else { return }
+                if model.inlineNote == nil, (try? model.text(path)).map({ Document($0).body }) != data?.body {
+                    model.refresh()
+                    return
+                }
+                model.beginInlineNote(path, offset: start, mode: .rich)
+                if let draft = model.inlineNote, draft.mode == .rich, draft.path == path {
+                    draft.selectionLength = m["length"] as? Int ?? 0
+                    draft.initialCommand = m["command"] as? String
+                    draft.viewportY = m["viewportY"] as? Double
+                }
+            case "dropImages":
+                guard data?.editable == true, model.canEditNote(path), let body = m["body"] as? String,
+                      let offset = m["at"] as? Int, let value = m["value"] as? String,
+                      offset >= 0, offset <= (body as NSString).length else { return }
+                model.beginInlineNote(path, offset: offset, mode: .rich)
+                guard let draft = model.inlineNote, draft.path == path, draft.mode == .rich, draft.text == body else { return }
+                let before = (body as NSString).substring(to: offset), after = (body as NSString).substring(from: offset)
+                let prefix = before.isEmpty || before.hasSuffix("\n\n") ? "" : before.hasSuffix("\n") ? "\n" : "\n\n"
+                let suffix = after.isEmpty || after.hasPrefix("\n\n") ? "" : after.hasPrefix("\n") ? "\n" : "\n\n"
+                draft.text = before + prefix + value + suffix + after
+                draft.caret = offset + (prefix + value).utf16.count
+                model.scheduleNoteSave(draft)
             case "imageMenu", "previewImage":
                 if let web = message.webView { handleImageMessage(m, in: web) }
             case "edit":

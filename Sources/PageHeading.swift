@@ -22,21 +22,25 @@ enum PageCategory {
         }
     }
 
-    var color: Color {
-        let rgb: UInt32
+    private var rgb: UInt32 {
         switch self {
-        case .project: rgb = 0xD72E78
-        case .report: rgb = 0x718615
-        case .kind(.questions): rgb = 0xC76509
-        case .kind(.concepts): rgb = 0xA53EC6
-        case .kind(.entities): rgb = 0x2464F5
-        case .kind(.events): rgb = 0x8054DC
-        case .kind(.references): rgb = 0x2679CB
-        case .webLinks: rgb = 0x00858C
-        case .log: rgb = 0x16855D
-        case .memo: rgb = 0xBC4679
+        case .project: return 0xD72E78
+        case .report: return 0x718615
+        case .kind(.questions): return 0xC76509
+        case .kind(.concepts): return 0xA53EC6
+        case .kind(.entities): return 0x2464F5
+        case .kind(.events): return 0x8054DC
+        case .kind(.references): return 0x2679CB
+        case .webLinks: return 0x00858C
+        case .log: return 0x16855D
+        case .memo: return 0xBC4679
         }
-        return Color(.sRGB, red: Double(rgb >> 16) / 255,
+    }
+
+    var cssColor: String { String(format: "#%06X", rgb) }
+
+    var color: Color {
+        Color(.sRGB, red: Double(rgb >> 16) / 255,
                      green: Double((rgb >> 8) & 255) / 255, blue: Double(rgb & 255) / 255)
     }
 }

@@ -1,0 +1,2 @@
+:root {color-scheme:light;--bg:#f4f4f4;--text:#383838;--surface:#eaeaea;--panel:#fafafa;--border:#c7cad0;--muted:#60656d;--accent:#596f86;--link:#395988;--font-size:15px;--content-width:820px}
+html,body,#editor{height:100%;margin:0}dialog{font:14px -apple-system,sans-serif;border:1px solid #bbb;border-radius:8px}dialog input{min-width:220px}dialog button{margin:5px}.sima-image-source{color:#25272a;background:#fff;appearance:none}.sima-document table{font-size:.9em}

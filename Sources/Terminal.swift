@@ -112,7 +112,7 @@ enum ResearchTarget {
     func materializedAnswer(_ response: String) throws -> String {
         guard let text = revisionText else { return response }
         if text.body.clean.isEmpty {
-            guard !response.clean.isEmpty else { throw Failure("Codex 没有返回正文。") }
+            guard !response.clean.isEmpty else { throw Failure("研究终端没有返回正文。") }
             return text.prefix + (isQuestion ? try turnAnswer(response) : response)
         }
         guard let revision = decode(TextRevision.self, response.clean) else {
@@ -122,7 +122,7 @@ enum ResearchTarget {
     }
 
     func save(_ answer: String, in project: ProjectAt, turn: ResearchTurn? = nil) throws -> String {
-        guard !answer.clean.isEmpty else { throw Failure("Codex 没有返回正文。") }
+        guard !answer.clean.isEmpty else { throw Failure("研究终端没有返回正文。") }
         switch self {
         case .archive(let id, let source, let localFile, let lakehouse, let prefix):
             struct Receipt: Decodable { var libraryPath: String }
@@ -172,6 +172,27 @@ enum ResearchTarget {
     }
 }
 
+enum ResearchProvider: String, CaseIterable {
+    case codex = "Codex", gemini = "Gemini", claude = "Claude"
+    static var selected: Self { Self(rawValue: UserDefaults.standard.string(forKey: "researchProvider") ?? "") ?? .codex }
+    var binary: String { rawValue.lowercased() }
+    var pathKey: String { self == .codex ? "cli" : "cli." + binary }
+    func arguments(action: Action, root: URL, project: URL, batch: Bool) -> [String] {
+        switch self {
+        case .codex: return Terminal.arguments(project: project, root: root, action: action)
+        case .claude:
+            var args = batch ? ["-p", "--output-format", "text"] : []
+            if batch && action != .archive { args += ["--tools", "Read,Grep,Glob,WebSearch,WebFetch"] }
+            if action == .publish || action == .archive { args += ["--add-dir", action == .archive ? project.path : root.path] }
+            return args
+        case .gemini:
+            var args = batch ? ["--output-format", "text", "--approval-mode", action == .archive ? "default" : "plan"] : []
+            if action == .publish || action == .archive { args += ["--include-directories", action == .archive ? project.path : root.path] }
+            return args
+        }
+    }
+}
+
 enum Terminal {
     static let defaults = UserDefaults.standard
     static func instruction(_ action: Action) -> String {
@@ -185,24 +206,24 @@ enum Terminal {
         if action != .preflight, configured?.trimmingCharacters(in: CharacterSet(charactersIn: "$ ")) == "sling-thematic-study" { return "" }
         return configured ?? (action == .preflight ? "sling-thematic-study" : (action == .publish || action == .archive) ? "sling-lakehouse-protocol" : "")
     }
-    static func executable(_ override: String) throws -> URL {
+    static func executable(_ override: String, provider: ResearchProvider = .codex) throws -> URL {
         func valid(_ path: String) -> Bool {
             var isDir: ObjCBool = false
             return path.hasPrefix("/") && fm.fileExists(atPath: path, isDirectory: &isDir) && !isDir.boolValue && fm.isExecutableFile(atPath: path)
         }
         if !override.clean.isEmpty {
             let path = (override.clean as NSString).expandingTildeInPath
-            guard valid(path) else { throw Failure("所选 Codex 文件不可执行，请在设置中重新选择。") }
+            guard valid(path) else { throw Failure("所选 CLI 文件不可执行，请在设置中重新选择。") }
             return URL(fileURLWithPath: path)
         }
-        let env = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map { String($0) + "/codex" }
-        let paths = env + ["/opt/homebrew/bin/codex","/usr/local/bin/codex",NSHomeDirectory() + "/.local/bin/codex"]
+        let env = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map { String($0) + "/" + provider.binary }
+        let paths = env + ["/opt/homebrew/bin", "/usr/local/bin", NSHomeDirectory() + "/.local/bin"].map { $0 + "/" + provider.binary }
         if let found = paths.first(where: valid) { return URL(fileURLWithPath: found) }
-        for name in ["Codex","ChatGPT"] {
+        for name in ["Codex","ChatGPT"] where provider == .codex {
             let app = "/Applications/" + name + ".app/Contents/Resources/"
             for suffix in ["codex","codex-cli/CodexCLI.app/Contents/MacOS/codex"] where valid(app + suffix) { return URL(fileURLWithPath: app + suffix) }
         }
-        throw Failure("尚未找到 Codex CLI。请在设置中选择这台 Mac 上的 codex 可执行文件。")
+        throw Failure("尚未找到 \(provider.rawValue) CLI，请在设置中选择 \(provider.binary) 可执行文件。")
     }
     static func arguments(project: URL, root: URL, action: Action) -> [String] {
         if action == .archive { return ["-C", root.path] }
@@ -250,7 +271,7 @@ enum Terminal {
     static func questionPrompt(_ entry: Entry, followUp: String? = nil) -> String {
         var parts = [entry.title]
         if let followUp { parts.append("本轮追问\n" + followUp) }
-        parts.append("由 Codex 直接回答本轮问题。不要调用研究 skill 或启动专题预研。")
+        parts.append("直接回答本轮问题。不要调用研究 skill 或启动专题预研。")
         if followUp == nil, !entry.body.clean.isEmpty {
             parts.append("当前内容\n" + String(entry.body.prefix(3200)))
         }
@@ -267,7 +288,7 @@ enum Terminal {
         try process.run()
         let result = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw Failure("无法读取 Codex 版本。") }
+        guard process.terminationStatus == 0 else { throw Failure("无法读取 CLI 版本。") }
         return String(decoding: result, as: UTF8.self).clean
     }
 }

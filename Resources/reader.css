@@ -60,3 +60,9 @@ article img.selected-image{outline:2px solid #809ac3;outline-offset:1px}
   border-radius:3px;background:#dce8fa;color:#203954;font:12px/18px ui-monospace,monospace;text-overflow:ellipsis}
 
 #image-source:focus-visible{outline:2px solid #597ba9;background:#fff;text-overflow:clip}
+::highlight(search-active){color:#312713;background:#f2cb72}
+
+#doc img[data-align] { display: block; }
+#doc img[data-align="left"] { margin-inline: 0 auto; }
+#doc img[data-align="center"] { margin-inline: auto; }
+#doc img[data-align="right"] { margin-inline: auto 0; }

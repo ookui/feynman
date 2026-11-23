@@ -151,7 +151,18 @@ document.addEventListener('mousedown',event => {
   if (!event.target.closest('#doc img')) { clearImageSelection(); return; }
   if (event.button === 0 || event.button === 2) imageForGesture(event);
 },true);
-document.addEventListener('click',event => { imageForGesture(event); },true);
+document.addEventListener('click',event => {
+  const image = imageForGesture(event);
+  if (!image || !state?.editable || state.editID || event.detail > 1) return;
+  const range = imageSourceRange(image);
+  if (!range || range.raw.startsWith('<')) return;
+  const path = file;
+  editTimer = setTimeout(() => {
+    if (file === path && selectedImage === image && document.activeElement !== imageLine) {
+      send({action:'rich',command:'image.source',start:range.start,viewportY:image.getBoundingClientRect().top});
+    }
+  }, state.doubleClickDelay ?? 350);
+},true);
 document.addEventListener('dblclick',event => {
   const image = imageForGesture(event);
   if (image?.getAttribute('src')) send({action:'previewImage', src:image.src, title:image.alt});

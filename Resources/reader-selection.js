@@ -188,6 +188,12 @@ document.addEventListener('keydown',event=>{
   if (event.isComposing || event.keyCode===229 || event.altKey) return;
   const range=selectedNoteRange();
   if (!range) return;
+  if (event.key==='Tab' && !event.metaKey && !event.ctrlKey && !state.editID &&
+      [...article.querySelectorAll('li')].some(li => range.intersectsNode(li))) {
+    event.preventDefault();
+    performEditorCommand(event.shiftKey ? 'list.outdent' : 'list.indent');
+    return;
+  }
   if (event.key==='Tab' && !event.metaKey && !event.ctrlKey && indentRenderedItems(range,event.shiftKey)) {
     event.preventDefault();
     return;

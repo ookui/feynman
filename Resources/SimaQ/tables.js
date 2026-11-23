@@ -237,6 +237,7 @@
         previous.widthsBefore=[...widths];
         const nextWidths=changeWidths(widths,id,column,count);
         widths.splice(0,widths.length,...nextWidths);
+        previous.widthsAfter = [...widths];
         options.onWidthsChange?.([...widths]);
       }
       active={row,column};
@@ -298,7 +299,12 @@
     container.addEventListener('beforecut',enableGridClipboard);
     container.addEventListener('beforecopy',enableGridClipboard);
     container.addEventListener('keydown',keydown);container.addEventListener('copy',clipboardEvent);container.addEventListener('cut',clipboardEvent);container.addEventListener('paste',paste);container.addEventListener('click',clickLink);document.addEventListener('pointerup',pointerup);render();
-    return {action,focus,pasteCells,openMenu,getWidths:()=>[...widths],focusAt(offset,end=offset){
+    return {action,focus,pasteCells,openMenu,syncImageSource(next,cell) {
+      const parsed = parse(next);
+      if (!parsed) return;
+      raw = next; model = parsed;
+      cell.querySelector('.sima-table-cell-input').value = model.rows[cell.dataset.row]?.[cell.dataset.column]?.text ?? '';
+    },getWidths:()=>[...widths],focusAt(offset,end=offset){
       const lo=Math.min(offset,end),hi=Math.max(offset,end);let nearest=null,distance=Infinity;
       model.rows.forEach((row,r)=>row.forEach((cell,c)=>{if(cell.start===null)return;const d=lo<cell.start?cell.start-lo:lo>cell.end?lo-cell.end:0;if(d<distance){distance=d;nearest={row:r,column:c,cell};}}));
       if(!nearest)return false;

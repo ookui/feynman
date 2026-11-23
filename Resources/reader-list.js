@@ -167,22 +167,6 @@ function listInput(edit, event) {
   return false;
 }
 
-function clipboardList(text) {
-  const body = text.replace(/\r\n?/g,'\n');
-  const tokens = marked.lexer(body).filter(t => t.type !== 'space');
-  if (!tokens.length || tokens.some(t => t.type !== 'list')) return null;
-  let cursor = 0;
-  const roots = [];
-  for (const token of tokens) {
-    const raw = token.raw.trimEnd(), start = body.indexOf(raw,cursor);
-    if (start < 0 || body.slice(cursor,start).trim()) return null;
-    cursor = start+raw.length;
-    cursor += body.slice(cursor).match(/^[ \t]*/)[0].length;
-    roots.push(...listStructure(token,body.slice(start,cursor),start));
-  }
-  return roots.length && !body.slice(cursor).trim() ? new ListOutline(body,roots) : null;
-}
-
 function editListCommand(edit,command,argument) {
   const field = edit.field, origin = fieldStart(edit);
   const before = {start:origin+field.selectionStart,end:origin+field.selectionEnd,backward:field.selectionDirection==='backward'};

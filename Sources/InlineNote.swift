@@ -11,7 +11,10 @@ import AppKit
     var text: String
     @Published var title: String
     var caret: Int
-    enum Mode { case paragraph, title, document }
+    enum Mode { case paragraph, title, document, rich }
+    var initialCommand: String?
+    var viewportY: Double?
+    var selectionLength = 0
     let mode: Mode
     var autosave: Task<Void, Never>?
     var cloudCopies: [CloudCopy]
@@ -178,7 +181,7 @@ private struct NoteEditingControls: View {
                     }.frame(maxHeight: 120)
                 }.padding(.horizontal)
             }
-            if draft.mode == .document || draft.needsReview || !draft.status.isEmpty {
+            if draft.mode == .rich || draft.mode == .document || draft.needsReview || !draft.status.isEmpty {
                 HStack {
                     Text(draft.status.isEmpty ? (draft.needsReview ? "请核对同步版本" : "Markdown · 自动保存") : draft.status)
                         .font(.caption).foregroundStyle(.secondary)
@@ -191,7 +194,7 @@ private struct NoteEditingControls: View {
                 }.padding(.horizontal, 18).padding(.vertical, 6)
             }
         }.onChange(of: draft.title) { _, _ in
-            if draft.mode == .document { m.scheduleNoteSave(draft) }
+            if draft.mode == .document || draft.mode == .rich { m.scheduleNoteSave(draft) }
         }
     }
 }

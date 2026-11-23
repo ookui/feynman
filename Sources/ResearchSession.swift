@@ -11,7 +11,7 @@ final class ResearchPTY {
     private var finished = false
     private var stopping = false
 
-    init(cli: URL, directory: URL, arguments: [String], inputFile: URL? = nil, cols: Int, rows: Int,
+    init(cli: URL, directory: URL, arguments: [String], inputFile: URL? = nil, outputFile: URL? = nil, cols: Int, rows: Int,
          output: @escaping (Data) -> Void, ended: @escaping (Int32) -> Void) throws {
         var fd: Int32 = -1, slave: Int32 = -1
         var name = [CChar](repeating: 0, count: 1024)
@@ -30,8 +30,8 @@ final class ResearchPTY {
         guard let helper = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("FeynmanTTY") else {
             close(fd); throw Failure("无法定位终端组件。")
         }
-        let command = inputFile == nil ? #"exec "$@""# : #"input_file="$1"; shift; exec "$@" < "$input_file""#
-        let args = [helper.path, "/bin/zsh", "-lc", command, "feynman"] + (inputFile.map { [$0.path] } ?? []) + [cli.path] + arguments
+        let command = outputFile != nil ? #"input_file="$1"; answer_file="$2"; shift 2; exec "$@" < "$input_file" > "$answer_file""# : inputFile == nil ? #"exec "$@""# : #"input_file="$1"; shift; exec "$@" < "$input_file""#
+        let args = [helper.path, "/bin/zsh", "-lc", command, "feynman"] + (inputFile.map { [$0.path] } ?? []) + (outputFile.map { [$0.path] } ?? []) + [cli.path] + arguments
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"; env["COLORTERM"] = "truecolor"
         if env["LANG"] == nil { env["LANG"] = "en_US.UTF-8" }
@@ -101,6 +101,8 @@ final class ResearchPTY {
     let project: ProjectAt
     let action: Action
     let context: String?
+    let provider: ResearchProvider
+    let directory: URL
     let cli: URL
     let arguments: [String]
     let draft: String
@@ -120,12 +122,14 @@ final class ResearchPTY {
     private(set) var web: WKWebView?
     private var closed = false
 
-    init(project: ProjectAt, root: URL, action: Action, context: String?, cli: URL, draft: String, target: ResearchTarget? = nil, resources: URL? = Bundle.main.resourceURL) {
+    init(project: ProjectAt, root: URL, action: Action, context: String?, cli: URL, provider: ResearchProvider = .codex, draft: String, target: ResearchTarget? = nil, resources: URL? = Bundle.main.resourceURL) {
         self.project = project; self.action = action; self.context = context
+        self.provider = provider
+        directory = action == .archive && provider != .codex ? root : project.url
         self.cli = cli; self.draft = draft; self.target = target
         if action == .question, case .entry(let item) = target, item.answered || !item.questionHistory.isEmpty { phase = .followUp }
         page = resources?.appendingPathComponent("console.html")
-        arguments = Terminal.arguments(project: project.url, root: root, action: action)
+        arguments = provider.arguments(action: action, root: root, project: project.url, batch: target != nil)
     }
     func view() -> WKWebView {
         if let web { return web }
@@ -182,19 +186,23 @@ final class ResearchPTY {
                     let file = runDirectory.appendingPathComponent("prompt.txt")
                     try Data(prompt.utf8).write(to: file, options: .atomic)
                     input = file
-                    args += ["exec", "--sandbox", action == .archive ? "workspace-write" : "read-only", "--skip-git-repo-check"]
-                    if let schema = target.responseSchema, let page {
-                        args += ["--output-schema", page.deletingLastPathComponent().appendingPathComponent(schema).path]
+                    if provider == .codex {
+                        args += ["exec", "--sandbox", action == .archive ? "workspace-write" : "read-only", "--skip-git-repo-check"]
+                        if let schema = target.responseSchema, let page {
+                            args += ["--output-schema", page.deletingLastPathComponent().appendingPathComponent(schema).path]
+                        }
+                        args += ["--output-last-message", outputURL.path, "-"]
+                    } else if provider == .gemini {
+                        args += ["-p", "执行标准输入中的任务。"]
                     }
-                    args += ["--output-last-message", outputURL.path, "-"]
                 } else {
-                    args += ["--", text]
+                    args += provider == .gemini ? ["--prompt-interactive", text] : ["--", text]
                 }
-                process = try ResearchPTY(cli: cli, directory: project.url, arguments: args, inputFile: input, cols: cols, rows: rows) { [weak self] data in
+                process = try ResearchPTY(cli: cli, directory: directory, arguments: args, inputFile: input, outputFile: input != nil && provider != .codex ? outputURL : nil, cols: cols, rows: rows) { [weak self] data in
                     self?.web?.evaluateJavaScript("receive('" + data.base64EncodedString() + "')")
                 } ended: { [weak self] code in self?.finish(code) }
                 phase = .running
-                status = action == .archive ? "正在归档 · 完成后更新引用" : target == nil ? "Codex CLI" : "研究中 · 完成后自动保存"
+                status = action == .archive ? "正在归档 · 完成后更新引用" : target == nil ? provider.rawValue + " CLI" : "研究中 · 完成后自动保存"
             } catch { showExit(error.localizedDescription); try? fm.removeItem(at: runDirectory) }
         case "resize": process?.resize(cols: cols, rows: rows)
         case "input":
@@ -216,24 +224,24 @@ final class ResearchPTY {
         guard action == .question, !exited, phase != .stopping else { return }
         if phase == .running, let process {
             phase = .stopping
-            status = "正在结束 Codex"
+            status = "正在结束 " + provider.rawValue
             process.stop()
         } else {
-            showExit("本次 Codex 对话已结束")
+            showExit("本次对话已结束")
         }
     }
     private func finish(_ code: Int32) {
         try? fm.removeItem(at: runDirectory.appendingPathComponent("prompt.txt"))
         defer { if retainedAnswer == nil { try? fm.removeItem(at: runDirectory) } }
         guard !closed else { return }
-        if phase == .stopping { showExit("Codex 已退出"); return }
-        guard code == 0 else { showExit("Codex 已中断，详见终端"); return }
-        guard let target else { showExit("Codex 已退出"); onSaved?(); return }
+        if phase == .stopping { showExit(provider.rawValue + " 已退出"); return }
+        guard code == 0 else { showExit(provider.rawValue + " 已中断，详见终端"); return }
+        guard let target else { showExit(provider.rawValue + " 已退出"); onSaved?(); return }
         do {
             let response = try String(contentsOf: outputURL, encoding: .utf8)
             if target.isQuestion { pendingTurn?.answer = try target.turnAnswer(response) }
             let body = try target.materializedAnswer(response)
-            let retained = pendingTurn.map { "## 本轮问题\n\n" + $0.question + "\n\n## Codex 回答\n\n" + $0.answer + "\n\n## 整合总结\n\n" + body } ?? body
+            let retained = pendingTurn.map { "## 本轮问题\n\n" + $0.question + "\n\n## 本轮回答\n\n" + $0.answer + "\n\n## 整合总结\n\n" + body } ?? body
             if retained != response { try Data(retained.utf8).write(to: outputURL, options: .atomic) }
             let message = try target.save(body, in: project, turn: pendingTurn)
             onSaved?()

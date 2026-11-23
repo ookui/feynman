@@ -332,6 +332,14 @@ extension Reader.Bridge {
             guard let asset else { return }
             self.uploadImage(asset)
         }
+        if rich {
+            let alignment = submenu("图片对齐")
+            for (index, label) in ["居左", "居中", "居右"].enumerated() {
+                add(label, to: alignment, enabled: editable) {
+                    web.callAsyncJavaScript("if (editor.getText() === body) imageAlignmentActions[index]?.()", arguments: ["body": body, "index": index], in: nil, in: .page, completionHandler: nil)
+                }
+            }
+        }
         let zoom = submenu("缩放预览")
         for (label,scale) in [("适应窗口",nil),("50%",0.5),("100%",1.0),("200%",2.0)] as [(String,CGFloat?)] {
             add(label,to:zoom,enabled:asset != nil) { preview(scale) }

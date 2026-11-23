@@ -1,0 +1,253 @@
+.sima-editor {
+  height: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--bg);
+  color: var(--text);
+  outline: 0;
+}
+.sima-editor::-webkit-scrollbar { width: 0; }
+.sima-document {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--content-width, 54rem);
+  margin: 0 auto;
+  padding: 1.35rem clamp(20px, 4vw, 48px) 2rem;
+  font: var(--body-weight, 400) var(--font-size, 16px)/var(--line-height, 1.72) var(--body-font, -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif);
+  color: var(--body-color, var(--text));
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+  caret-color: var(--accent);
+}
+.sima-block { position: relative; display: flow-root; min-width: 0; cursor: text; }
+.sima-block[data-kind="blank"] { min-height: .42em; }
+.sima-block[data-kind="blank"]:last-child { min-height: 1.7em; }
+.sima-end-entry { min-height: 2.5em; cursor: text; }
+@media print { .sima-end-entry { display: none; } }
+.sima-block p { margin: var(--paragraph-before, .28em) 0 var(--paragraph-after, .33em); }
+.sima-document a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: .17em; cursor: pointer; }
+.sima-block ul, .sima-block ol { margin: .32em 0; padding-inline-start: 1.65em; }
+.sima-document .sima-block > :is(ul,ol) { margin-block: .55em; }
+.sima-document :is(ul,ol) > li + li { margin-block-start: .48em; }
+.sima-document li :is(ul,ol) > li + li { margin-block-start: .32em; }
+.sima-block blockquote { margin: .4em 0; border-inline-start: 3px solid var(--accent); padding: .1em 1em; color: var(--muted); }
+.sima-block pre:not(.sima-text-mirror) { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sima-document code { font-family: var(--monospace, ui-monospace, Menlo, monospace); }
+.sima-document :not(pre)>code { background: var(--surface); padding: .08em .28em; border-radius: .2em; }
+.sima-document img { max-width: 100%; height: auto; }
+.sima-sized-image { display: inline-block; position: relative; max-width: 100%; vertical-align: middle; }
+.sima-sized-image > img { display: block; cursor: default; }
+.sima-sized-image.sima-fluid-svg, .sima-fluid-svg > img:not([width]) { width: 100%; }
+.sima-sized-image:has(> .sima-image-source) { outline: 1px solid var(--accent); }
+.sima-image-source {
+  display: grid; grid-template-columns: minmax(0, 1fr); max-width: 100%; margin-bottom: .25em;
+  font: .86em/1.5 var(--monospace, monospace);
+}
+/* The hidden copy sizes the editing row using the same glyphs and available width. */
+.sima-image-source::before, .sima-document textarea.sima-image-caption {
+  grid-area: 1 / 1; box-sizing: border-box; min-width: 0; padding: .2em .4em;
+  font: inherit; letter-spacing: inherit; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.sima-image-source::before { content: attr(data-source) "\200b"; visibility: hidden; }
+.sima-document textarea.sima-image-caption {
+  display: block; position: static; width: 100%; min-height: 0; contain: size;
+  margin: 0; border: 0; appearance: none; resize: none; overflow: hidden;
+  background: var(--surface); color: var(--text); cursor: text;
+}
+@media print { .sima-image-source { display: none; } }
+#workspaceShell .sima-image-grip {
+  position: absolute; right: 0; bottom: 0; width: 24px; height: 22px; padding: 0;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text);
+  font: 16px/1 system-ui; cursor: ew-resize; touch-action: none; opacity: 0;
+}
+#workspaceShell .sima-sized-image:hover > .sima-image-grip, #workspaceShell .sima-image-grip:focus-visible { opacity: 1; }
+#workspaceShell [data-image-align="right"] .sima-image-grip { left: 0; right: auto; }
+@media print { .sima-image-grip { display: none; } }
+.sima-document hr { border: 0; border-top: 1px solid var(--border); margin-block: 1em; }
+/* A small visible mark inside a wider pointer and keyboard target. */
+.sima-document .sima-block .sima-yaml-toggle {
+  display:grid; place-items:center; width:64px; height:22px; padding:0;
+  margin-inline:auto; border:0; border-radius:4px; background:transparent !important; cursor:pointer;
+}
+.sima-yaml-toggle[aria-expanded="false"]::before {
+  content:""; width:32px; height:2px; background:var(--border); border-radius:1px;
+}
+.sima-yaml-toggle:is(:hover,:focus-visible)::before { background:var(--muted); }
+.sima-block .md-meta-block[hidden] { display:none !important; }
+.sima-editor::after { content:""; display:block; height:var(--outline-tail,0px); pointer-events:none; }
+/* The background follows the editor pane while text follows the reading column. */
+@media screen {
+  .sima-editor { container-type: inline-size; }
+  #write:has(> .sima-page-header:first-child) { padding-block-start: 0; }
+  .sima-page-header {
+    --header-accent: var(--directory-accent, var(--accent));
+    position: relative;
+    isolation: isolate;
+    padding-block: 1.25rem 1rem;
+    margin-block-end: .75rem;
+  }
+  .sima-page-header::before {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    pointer-events: none;
+    inset-block: 0;
+    inset-inline-start: 50%;
+    width: 100cqi;
+    transform: translateX(-50%);
+    background: radial-gradient(ellipse 54% 103% at 50% 0%,
+      color-mix(in srgb, var(--header-accent) 17%, var(--bg)),
+      color-mix(in srgb, var(--header-accent) 15%, var(--bg)) 24%,
+      color-mix(in srgb, var(--header-accent) 10%, var(--bg)) 51%,
+      color-mix(in srgb, var(--header-accent) 3%, var(--bg)) 82%,
+      var(--bg));
+    border-bottom: 1px solid var(--border);
+    --header-line-edge: color-mix(in srgb, var(--border) 45%, var(--bg));
+    border-image: linear-gradient(to right, var(--header-line-edge),
+      var(--border) 50%,
+      var(--header-line-edge)) 1;
+  }
+  #write .sima-page-header h1, #write .sima-page-header [data-kind="heading"] .sima-text-pair {
+    margin-block: 0;
+    line-height: 1.27;
+  }
+  .sima-page-header [data-kind="yaml"] { margin-bottom: .4rem; }
+  .sima-folder-tag {
+    display: inline-block;
+    max-width: 100%;
+    margin-top: .45rem;
+    padding: .08em .48em;
+    border-radius: .3em;
+    background: color-mix(in srgb, var(--header-accent) 11%, var(--bg));
+    color: color-mix(in srgb, var(--header-accent) 75%, var(--text));
+    font: 500 .83em/1.45 var(--body-font, system-ui);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  :root[data-appearance="dark"] .sima-folder-tag {
+    color: color-mix(in srgb, var(--header-accent) 40%, white);
+  }
+  .sima-page-header [data-kind="blank"]:not(.sima-active-block) { min-height: 2px; }
+  #write [data-kind="yaml"] > :is(pre.md-meta-block, .sima-text-pair) {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font: italic max(10px, calc(.88em - 2px))/1.35 var(--monospace, ui-monospace, monospace);
+  }
+  #write [data-kind="yaml"] > .sima-yaml-toggle {
+    margin-inline: 0 auto;
+    justify-items: start;
+    width: 2rem;
+    height: 1rem;
+  }
+}
+.sima-block .yaml-key { color: var(--yaml-key, var(--accent)); }
+.sima-block .yaml-value { color: var(--yaml-value, var(--muted)); }
+.sima-block .yaml-comment { color: var(--yaml-comment, var(--muted)); }
+.sima-text-pair {
+  display: grid;
+  position: relative;
+  min-width: 0;
+  margin: var(--paragraph-before, .28em) 0 var(--paragraph-after, .33em);
+}
+.sima-text-pair > .sima-text-mirror, .sima-text-pair > textarea {
+  grid-area: 1 / 1;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 1lh;
+  text-align: start;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  tab-size: 4;
+  text-transform: none;
+  letter-spacing: inherit;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  line-height: inherit;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+.sima-text-pair > .sima-text-mirror {
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+  overflow: hidden;
+}
+.sima-text-pair > textarea {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  overflow: hidden;
+  resize: none;
+  outline: none;
+  appearance: none;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--accent);
+}
+.sima-text-pair > textarea::selection { background: color-mix(in srgb,var(--selection) 64%,transparent); }
+.sima-line-end { font-style: normal; }
+.sima-token-strong { text-shadow: .035em 0 currentColor; }
+.sima-token-em { text-decoration: underline dotted; }
+.sima-token-strike { text-decoration: line-through; }
+.sima-token-mark { background: var(--search-hit); color: var(--search-hit-text,inherit); }
+.sima-token-code { background: var(--surface); }
+.sima-token-link { color: var(--link); text-decoration: underline; }
+.sima-token-punct { color: var(--muted); }
+.sima-editor .md-search-hit { background: var(--search-hit); color: var(--search-hit-text,inherit); }
+.sima-editor .md-search-select { background: var(--search-current); color: var(--search-current-text,white); }
+.sima-block h1, .sima-block[data-heading="1"] .sima-text-pair { font-family: var(--h1-font,inherit); font-weight: var(--h1-weight,710); font-size: var(--h1-size,2.06em); color: var(--h1-color,inherit); margin-block: var(--h1-before,.4em) var(--h1-after,.42em); line-height: 1.27; }
+.sima-block h2, .sima-block[data-heading="2"] .sima-text-pair { font-family: var(--h2-font,inherit); font-weight: var(--h2-weight,660); font-size: var(--h2-size,1.52em); color: var(--h2-color,inherit); margin-block: var(--h2-before,.64em) var(--h2-after,.34em); line-height: 1.36; }
+.sima-block h3, .sima-block[data-heading="3"] .sima-text-pair { font-family: var(--h3-font,inherit); font-weight: var(--h3-weight,650); font-size: var(--h3-size,1.2em); color: var(--h3-color,inherit); margin-block: var(--h3-before,.62em) var(--h3-after,.3em); line-height: 1.4; }
+.sima-block h4, .sima-block[data-heading="4"] .sima-text-pair { font-family: var(--h4-font,inherit); font-weight: var(--h4-weight,630); font-size: var(--h4-size,1.08em); color: var(--h4-color,inherit); margin-block: var(--h4-before,.6em) var(--h4-after,.3em); line-height: 1.4; }
+.sima-block h5, .sima-block[data-heading="5"] .sima-text-pair { font-family: var(--h5-font,inherit); font-size: var(--h5-size,1em); font-weight: var(--h5-weight,630); color: var(--h5-color,inherit); margin-block: var(--h5-before,.62em) var(--h5-after,.3em); }
+.sima-block h6, .sima-block[data-heading="6"] .sima-text-pair { font-family: var(--h6-font,inherit); font-size: var(--h6-size,.95em); font-weight: var(--h6-weight,600); color: var(--h6-color,inherit); margin-block: var(--h6-before,.62em) var(--h6-after,.3em); }
+.sima-source .sima-document, .sima-block[data-kind="yaml"] .sima-text-pair, .sima-block[data-kind="code"] .sima-text-pair {
+  font-family: var(--monospace, ui-monospace,'SFMono-Regular',Menlo,'PingFang SC',monospace);
+}
+.sima-source .sima-text-pair { min-height: 55vh; }
+.sima-focus-mode .sima-document:focus-within .sima-block:not(.sima-active-block):not(:focus-within) { opacity: .55; }
+.sima-typewriter .sima-document { padding-bottom: 48vh; }
+.sima-composing .sima-text-pair > textarea { color: inherit; -webkit-text-fill-color: currentColor; }
+.sima-composing .sima-text-pair > .sima-text-mirror { visibility: hidden; }
+.sima-table-size { color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 12px; width: 280px; padding: 20px; box-shadow: 0 12px 48px #0002; }
+.sima-table-size::backdrop { background: #10171040; }
+.sima-size-form { display: grid; gap: 13px; font: 14px/1.5 -apple-system, sans-serif; }
+.sima-size-form h3 { margin: 0 0 .25em; font-size: 17px; }
+.sima-size-form label { display: flex; justify-content: space-between; align-items: center; }
+.sima-size-form input { width: 5em; padding: 4px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font: inherit; }
+.sima-size-actions { display: flex; gap: 6px; justify-content: flex-end; }
+#workspaceShell .sima-size-actions button { padding: 4px 12px; border-radius: 5px; }
+#workspaceShell .sima-size-actions .sima-primary { color: var(--bg); background: var(--accent); }
+.sima-block[data-paragraph-style="quote"] .sima-text-pair { border-inline-start: 3px solid var(--accent); padding-inline-start: 1em; color: var(--muted); }
+.sima-block[data-paragraph-style="quote"] textarea { inset-inline-start: 1em; width: calc(100% - 1em); }
+.sima-block:is([data-paragraph-style="bullet"],[data-paragraph-style="task"],[data-paragraph-style="ordered"]) .sima-text-pair { margin-inline-start: .5em; }
+
+.sima-references { max-width:var(--content-width); margin:0 auto; padding:0 clamp(20px,4vw,48px) 2rem; color:var(--text); font:var(--font-size)/1.5 var(--body-font); }
+.sima-references summary { border-top:1px solid var(--border); padding:.8em 0; cursor:pointer; font-weight:600; }
+.sima-references p { color:var(--muted); font-size:.9em; }
+.sima-references .reference-card {
+  display:flex; align-items:baseline; gap:.65em; width:100%; margin:.35em 0; padding:.55em .65em .55em .9em;
+  background:var(--surface); background:color-mix(in srgb,var(--bg),var(--muted) 7%);
+  border:1px solid var(--border); border-color:color-mix(in srgb,var(--bg),var(--muted) 18%);
+  border-inline-start:5px solid var(--border); border-radius:6px; cursor:pointer;
+}
+.reference-excerpt { flex:1; min-width:0; font-size:calc(1em - 1px); overflow-wrap:anywhere; }
+.reference-excerpt a { color:var(--link); text-decoration:underline; text-underline-offset:.15em; }
+.reference-excerpt .reference-target {
+  background:#e1eeea; color:#28584d; border-radius:3px; padding:0 .15em;
+  font-weight:600; -webkit-box-decoration-break:clone; box-decoration-break:clone;
+}
+:root[data-appearance="dark"] .reference-excerpt .reference-target { background:#293d38; color:#b2d9cb; }
+#workspaceShell .reference-card button { color:var(--muted); border-radius:4px; cursor:pointer; padding:.05em .35em; }
+#workspaceShell .reference-card button:hover { background:var(--shell-hover); color:var(--text); }
+.sima-source .sima-references { display:none; }

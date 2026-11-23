@@ -174,6 +174,15 @@ function sanitize(html) {
       }
     }
   }
+  for (const image of template.content.querySelectorAll('img')) {
+    const suffix = image.nextSibling;
+    if (suffix?.nodeType !== Node.TEXT_NODE) continue;
+    const match = /^(?:\{width=([1-9]\d{0,4})\})?(?:\{align=(left|center|right)\})?/.exec(suffix.data);
+    if (!match[0]) continue;
+    suffix.deleteData(0, match[0].length);
+    if (match[1]) image.style.width = match[1] + 'px';
+    if (match[2]) image.dataset.align = match[2];
+  }
   return template.content;
 }
 function removeDeletedLinks(root,data) {
@@ -241,6 +250,8 @@ function renderHistory(turns, expanded, openTurns) {
   article.append(details);
 }
 function render(data) {
+  const searchMoved = data.searchNavigation && data.searchNavigation !== state?.searchNavigation;
+  if(searchMoved || data.searchLanding && data.file !== file) requestAnimationFrame(()=>{if(state?.file===data.file) revealSearchHit(data.searchLanding);});
   if (composingRange && data.file===file && data.body===state.body && data.editID===state.editID) {
     state=data;
     return;
@@ -282,6 +293,7 @@ function paint(data, keepScroll = false) {
   clearTimeout(editTimer);
   const content = document.createDocumentFragment();
   let cursor = 0;
+  const richBlocks = richReaderBlocks(data.body);
   const tokens = marked.lexer(data.body);
   documentLinks = tokens.links;
   let tableOrdinal = 0;
@@ -297,6 +309,7 @@ function paint(data, keepScroll = false) {
     const start = data.body.indexOf(raw, cursor);
     const block = sanitize(marked.Parser.parse([token]));
     if (start >= 0) {
+      enrichReaderBlock(block, richBlocks.get(start), raw);
       cursor = start + raw.length;
       const end = token.type === 'list' ? cursor + data.body.slice(cursor).match(/^[ \t]*/)[0].length
                                         : start + raw.replace(/\n+$/, '').length;
@@ -325,12 +338,13 @@ function paint(data, keepScroll = false) {
   const previousImage = same && imageBookmark();
   if (same) preserveImageSizes(content);
   article.replaceChildren(content);
+  void typesetReaderMath(article);
   if (!article.childElementCount && data.editable !== false) {
     const prompt = document.createElement('button');
     prompt.className = 'empty-note';
     prompt.textContent = '点击此处开始撰写';
     sourceBlocks.set(prompt, {start:0,end:data.body.length});
-    prompt.onclick = () => requestBlock(0);
+    prompt.onclick = () => send({action:'rich', start:0});
     article.append(prompt);
   }
   if (Array.isArray(data.questionHistory)) renderHistory(data.questionHistory, historyExpanded, openTurns);
@@ -846,7 +860,7 @@ article.addEventListener('click', event => {
     if (getSelection().isCollapsed) send({action:'link', href:link.getAttribute('href')});
     return;
   }
-  if (state?.editable === false || event.detail > 1 || event.target.closest('button,details,mark') || !getSelection().isCollapsed) return;
+  if (state?.editable === false || event.detail > 1 || event.target.closest('button,details,mark[role=button]') || !getSelection().isCollapsed) return;
   let block = event.target;
   while (block !== article && !editableSpan(block)) block = block.parentElement;
   const line=tableLineInGap(event);
@@ -877,7 +891,8 @@ article.addEventListener('click', event => {
   if (cell) cell.caret = offset-cell.start;
   if (activeBlock || state.editID) requestBlock(offset,event.clientY,cell);
   else editTimer = setTimeout(() => {
-    if (getSelection().isCollapsed) requestBlock(offset,event.clientY,cell);
+    if (!getSelection().isCollapsed) return;
+    send({action:'rich', start:offset, viewportY:event.clientY});
   }, state.extract ? (state.doubleClickDelay ?? 350) : 0);
 });
 let scrollTimer;

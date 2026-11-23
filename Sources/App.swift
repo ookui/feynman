@@ -43,6 +43,7 @@ struct Primary: ButtonStyle {
         .commands {
             CommandGroup(replacing: .newItem) { Button("New Project…") { model.dialog = .create }.keyboardShortcut("n") }
             CommandGroup(replacing: .appSettings) { Button("Settings…") { model.dialog = .settings }.keyboardShortcut(",") }
+            MarkdownCommands(model: model)
             HistoryCommands(model: model)
             CommandMenu("Research") {
                 Button("Project List") { model.home(); model.refreshProjects() }.keyboardShortcut("l", modifiers: [.command,.shift])
@@ -84,6 +85,7 @@ private struct HistoryCommands: Commands {
 struct MainView: View {
     @ObservedObject var model: Workspace
     @State private var sidebar = true
+    @State private var searchFocusRequest = 0
     @State private var historyKeyMonitor: Any?
     @AppStorage("outlineWidth") private var outlineWidth = 236.0
     @AppStorage("relationsWidth") private var relationsWidth = 0.0
@@ -98,7 +100,7 @@ struct MainView: View {
             let relations = max(220, min(preferred, maxRelations))
             HStack(spacing: 0) {
             if sidebar {
-                Sidebar(m: model).frame(width: outline).background(rail)
+                Sidebar(m: model, focusRequest: searchFocusRequest).frame(width: outline).background(rail)
                 PaneDivider(label: "大纲宽度", width: outline, direction: 1) {
                     outlineWidth = max(155, min($0, maxOutline))
                 }
@@ -152,7 +154,7 @@ struct MainView: View {
                 }
             }.background(paper)
             }
-        }.foregroundStyle(ink).onReceive(timer) { _ in model.poll() }
+        }.foregroundStyle(ink).onReceive(NotificationCenter.default.publisher(for: .focusProjectSearch)) { _ in sidebar = true; searchFocusRequest += 1 }.onReceive(timer) { _ in model.poll() }
         .onAppear {
             guard historyKeyMonitor == nil else { return }
             historyKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -307,7 +309,11 @@ private struct ButtonHighlight: ViewModifier {
 }
 
 struct Sidebar: View {
+    @FocusState private var searchFocused: Bool
+    @State private var collapsedResults = Set<String>()
+    @State private var rowLimits: [String:Int] = [:]
     @ObservedObject var m: Workspace
+    var focusRequest = 0
     func row(_ label:String,_ category:PageCategory?,_ place:Place, hover: PageCategory? = nil) -> some View {
         Button { m.go(place) } label: {
             HStack {
@@ -332,13 +338,27 @@ struct Sidebar: View {
             Divider().padding(.vertical,8)
             if m.project != nil {
                 HStack(spacing: 4) {
-                    TextField("搜索标题和正文", text: $m.search).focusedValue(\.editingNavigationKeys, true)
+                    TextField("搜索标题和正文", text: $m.search).focused($searchFocused).task(id: focusRequest) { if focusRequest > 0 { searchFocused = true } }.focusedValue(\.editingNavigationKeys, true)
                         .textFieldStyle(.roundedBorder)
                     if !m.search.isEmpty {
-                        Button { m.search = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        Button { m.search = ""; m.searchDocument = nil } label: { Image(systemName: "xmark.circle.fill") }
                             .buttonStyle(.plain).foregroundStyle(.secondary).help("清空搜索")
                     }
                 }.padding(.horizontal,12).padding(.bottom,8)
+                if searchFocused || !m.search.isEmpty || m.searchDocument != nil {
+                    HStack(spacing: 4) {
+                        Menu {
+                            Toggle("精确短语", isOn: $m.searchOptions.exact)
+                            Toggle("区分大小写", isOn: $m.searchOptions.sensitive)
+                            Toggle("全词匹配", isOn: $m.searchOptions.whole)
+                            Toggle("正则表达式", isOn: $m.searchOptions.isRegex)
+                            Divider()
+                            Button("搜索整个项目") { m.searchDocument = nil }
+                            if let path = m.currentNotePath { Button("只搜索当前文档") { m.searchDocument = path } }
+                        } label: { Label(m.searchDocument.map(documentLabel) ?? "整个项目", systemImage:"line.3.horizontal.decrease.circle") }
+                        .menuStyle(.borderlessButton)
+                    }.padding(.horizontal,12)
+                }
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 1) {
                         let retained = m.retainedItems
@@ -363,7 +383,29 @@ struct Sidebar: View {
                                 Text("没有匹配的条目").font(.callout).foregroundStyle(.secondary).padding(.vertical, 8)
                             }
                             ForEach(m.searchHits) { hit in
-                                searchRow(hit.item, snippet: hit.snippet, pinned: pinned.contains(hit.id))
+                                VStack(alignment:.leading, spacing:2) {
+                                    HStack(spacing:2) {
+                                        Button { if !collapsedResults.insert(hit.id).inserted { collapsedResults.remove(hit.id) } } label: {
+                                            Image(systemName: collapsedResults.contains(hit.id) ? "chevron.right" : "chevron.down").font(.caption2)
+                                        }.buttonStyle(.plain)
+                                        searchRow(hit.item, snippet:nil, pinned:pinned.contains(hit.id), hit:hit)
+                                        Text(String(hit.occurrences.count + (hit.titleMatch ? 1 : 0))).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                    }
+                                    if !collapsedResults.contains(hit.id) {
+                                        ForEach(Array(hit.occurrences.prefix(rowLimits[hit.id] ?? 5).enumerated()),id:\.offset) { _, o in
+                                            Button { m.openSearchOccurrence(hit,o) } label: {
+                                                VStack(alignment:.leading,spacing:2) {
+                                                    if let page = o.page { Text("第 \(page) 页").foregroundStyle(.secondary) }
+                                                    (Text(o.before) + Text(o.match).bold().foregroundColor(ink) + Text(o.after)).lineLimit(2)
+                                                }.font(.caption).foregroundStyle(.secondary)
+                                            }.buttonStyle(SidebarLinkStyle(selected:m.searchLanding == o)).padding(.leading,14)
+                                        }
+                                        if hit.occurrences.count > (rowLimits[hit.id] ?? 5) {
+                                            Button("显示更多") { rowLimits[hit.id,default:5] += 25 }.buttonStyle(.link).padding(.leading,18)
+                                        }
+                                    }
+                                    Divider()
+                                }
                             }
                         }
                     }.padding(.horizontal,10)
@@ -375,7 +417,7 @@ struct Sidebar: View {
             Spacer(minLength:4)
             Divider()
             Button { m.dialog = .settings } label: { Label { Text(m.root?.lastPathComponent ?? "选择工作目录") } icon: { Image(systemName: "folder") }.lineLimit(1) }.buttonStyle(SidebarLinkStyle()).foregroundStyle(.secondary).padding(8)
-        }.font(.system(size:13))
+        }.font(.system(size:13)).onChange(of:m.search) { collapsedResults.removeAll(); rowLimits.removeAll() }
     }
     @ViewBuilder private var outline: some View {
         row("Project Overview",.project,.overview)
@@ -383,7 +425,7 @@ struct Sidebar: View {
             Button { toggle("reports") } label: {
                 Image(systemName: m.expanded.contains("reports") ? "chevron.down" : "chevron.right").frame(width: 12)
             }.buttonStyle(SidebarLinkStyle(fullWidth: false, horizontalInset: 2))
-            Button { if let report = m.snapshot.reports.last { m.go(.doc(report)) } else { m.go(.overview) } } label: {
+            Button { if let report = m.snapshot.reports.last { m.go(.doc(report)) } else { m.go(.preliminary) } } label: {
                 HStack {
                     Label { Text("Preliminary") } icon: { CategoryTag(category: .report, compact: true) }
                     Spacer()
@@ -417,7 +459,7 @@ struct Sidebar: View {
                 ForEach(entries.filter { !m.snapshot.isWebReference($0) }) { e in
                     Button { m.go(.entry(e.id)) } label: {
                         HStack(spacing:6) {
-                            Text(e.title).lineLimit(1); Spacer(minLength:0)
+                            Text((e.core ? "★ " : "") + e.title).fontWeight(e.core ? .bold : .regular).lineLimit(1); Spacer(minLength:0)
                             if e.origin == "预研提取" { Tag(text:e.origin,color:Color(white: 0.42)) }
                         }
                     }.buttonStyle(SidebarLinkStyle(selected: m.place == .entry(e.id), color: PageCategory.kind(k).color)).padding(.leading,42).help(e.title).contextMenu { EntryActions(m: m, entry: e) }
@@ -428,7 +470,8 @@ struct Sidebar: View {
         row("过程日志",.log,.doc("log.md")); row("我的 Memo",.memo,.doc("memo.md"))
     }
 
-    private func searchRow(_ item: ProjectSearchItem, snippet: String?, pinned: Bool) -> some View {
+    private func searchRow(_ item: ProjectSearchItem, snippet: String?, pinned: Bool, hit: ProjectSearchHit? = nil) -> some View {
+        let core: Bool = { if case .entry(let id) = item.target { return m.snapshot.resolve(id)?.core == true }; return false }()
         let selected: Bool = {
             switch item.target {
             case .entry(let id): return m.place == .entry(id)
@@ -437,10 +480,10 @@ struct Sidebar: View {
             }
         }()
         return HStack(alignment: .top, spacing: 4) {
-            Button { m.openSearchItem(item) } label: {
+            Button { if let hit { m.openSearchOccurrence(hit,nil) } else { m.openSearchItem(item) } } label: {
                 HStack(alignment: .top, spacing: 6) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(item.title).lineLimit(2)
+                        Text((core ? "★ " : "") + item.title).fontWeight(core ? .bold : .regular).lineLimit(2)
                         if let snippet { Text(snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
                     }
                     Spacer(minLength: 0)

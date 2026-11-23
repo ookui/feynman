@@ -98,7 +98,7 @@ struct Panels: View {
             Text("同时移除项目中指向此条目的关联。报告和 Memo 保留原文，指向已删条目的链接将显示为普通文字。")
             HStack { Spacer(); cancel(); Button("删除",role:.destructive) { m.attempt { var item=e; item.deleted=true; try m.store(item); m.dialog=nil; m.go(.group(e.kind)) } } }
         case .cite(let e):
-            Text("回写到知识库").font(.title3.bold()); Text("在工作台终端中交给 Codex 整理「" + e.title + "」，按当前知识库规范写入并记录反向引用。")
+            Text("回写到知识库").font(.title3.bold()); Text("在工作台终端中交给研究终端整理「" + e.title + "」，按当前知识库规范写入并记录反向引用。")
             HStack { Spacer(); cancel(); Button("打开终端") { m.dialog=nil; m.launch(.publish,context:e.path) }.keyboardShortcut(.defaultAction) }
         case .backlinks(let asset):
             Text("引用这份资料的项目").font(.title3.bold()); Text(String(asset.dropFirst(8))).font(.caption).foregroundStyle(.secondary)
@@ -243,7 +243,8 @@ private enum MenuLanguage: String, CaseIterable {
 
 struct SettingsPanel: View {
     @ObservedObject var m: Workspace
-    @AppStorage("cli") var cli = ""
+    @AppStorage("researchProvider") var provider = ResearchProvider.codex
+    @State var cli = UserDefaults.standard.string(forKey: ResearchProvider.selected.pathKey) ?? ""
     @State var action = Action.preflight
     @State var skill = Terminal.skill(.preflight)
     @State var prompt = Terminal.instruction(.preflight)
@@ -265,29 +266,36 @@ struct SettingsPanel: View {
             Text("工作目录").font(.headline)
             HStack { Text(m.root?.path ?? "尚未选择").lineLimit(2).textSelection(.enabled); Spacer(); Button("选择…") { if let url=m.chooseFolder("选择知识库或工作目录，新项目将保存在其中的 Feynman 目录") { m.setRoot(url) } } }
             Divider()
-            Text("Codex CLI").font(.headline)
+            OverviewShortcutSetting()
+            Picker("研究终端", selection: $provider) {
+                ForEach(ResearchProvider.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.segmented).onChange(of: provider) { _, next in
+                cli = UserDefaults.standard.string(forKey: next.pathKey) ?? ""
+                test = ""
+                detect()
+            }
             HStack { TextField("自动检测，或输入可执行文件路径",text:$cli); Button("浏览…") { let panel=NSOpenPanel(); if panel.runModal() == .OK, let url=panel.url { cli=url.path } } }
             Text(detected).lineLimit(2).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             HStack { Button("检测 CLI 版本") {
                 Task {
                     do {
-                        let url = try Terminal.executable(cli)
+                        let url = try Terminal.executable(cli, provider: provider)
                         test = try await Task.detached { try Terminal.version(url) }.value
                     } catch { test = error.localizedDescription }
                 }
             }; Text(test).font(.caption) }
             Divider()
             Picker("研究动作",selection:$action) { ForEach(Action.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
-            if action == .question { Text("由 Codex 直接回答当前问题").foregroundStyle(.secondary) }
+            if action == .question { Text("由当前研究终端直接回答问题").foregroundStyle(.secondary) }
             else { TextField("Skill 名称（可留空）",text:$skill) }
             Text("默认指令").font(.caption).foregroundStyle(.secondary)
             TextEditor(text:$prompt).frame(height:64).border(.gray.opacity(0.25))
             HStack { Spacer(); Button("完成") { persist(); m.dialog=nil }.keyboardShortcut(.defaultAction) }
         }.padding(24).frame(width:565).onAppear { detect() }
-        .onChange(of:cli) { detect() }
+        .onChange(of:cli) { UserDefaults.standard.set(cli, forKey: provider.pathKey); detect() }
         .onChange(of:action) { _, new in skill=Terminal.skill(new); prompt=Terminal.instruction(new) }
         .onChange(of:skill) { persist() }.onChange(of:prompt) { persist() }
     }
     func persist() { UserDefaults.standard.set(skill.clean,forKey:"skill." + action.rawValue); UserDefaults.standard.set(prompt,forKey:"prompt." + action.rawValue) }
-    func detect() { do { detected=try Terminal.executable(cli).path } catch { detected=error.localizedDescription } }
+    func detect() { do { detected=try Terminal.executable(cli, provider: provider).path } catch { detected=error.localizedDescription } }
 }

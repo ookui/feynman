@@ -1,0 +1,24 @@
+.sima-table-block{position:relative;margin:1.25em 0;max-width:100%;outline:none;color:var(--table-color,var(--text,#292a2d));font-family:var(--table-font,var(--body-font,system-ui));font-size:var(--table-font-size,.9em)}
+.sima-table-scroll{overflow-x:auto;padding:3px 2px 8px}
+.sima-table{border-collapse:collapse;table-layout:auto;width:100%;min-width:240px;background:var(--table-background,transparent);line-height:1.55}
+.sima-table th,.sima-table td{position:relative;vertical-align:top;min-width:64px;border:1px solid var(--table-border,var(--border,#ddd));padding:var(--table-padding,8px 12px);white-space:pre-wrap;overflow-wrap:anywhere;outline:none;cursor:text}
+.sima-table th{font-family:var(--table-header-font,var(--table-font,inherit));font-size:var(--table-header-size,inherit);font-weight:var(--table-header-weight,600);color:var(--table-header-color,inherit);background:var(--table-header-background,var(--surface,#f7f7f8))}
+.sima-table td.selected,.sima-table th.selected{box-shadow:inset 0 0 0 1px var(--focus,#5c8bcb)}
+.sima-table-block:focus-within .sima-table .selected{background:color-mix(in srgb,var(--selection,#d4e3f7) 35%,var(--table-background,transparent))}
+.sima-table-cell-content{display:grid}
+.sima-table-cell-content>.sima-table-cell-view,.sima-table-cell-content>.sima-table-cell-input{grid-area:1 / 1}
+.sima-table-cell-view{min-height:1.55em;overflow-wrap:anywhere}
+.sima-table-cell-input{display:none;box-sizing:border-box;width:100%;min-width:0;min-height:1.55em;margin:0;padding:0;border:0;outline:0;background:transparent;color:inherit;font:inherit;line-height:inherit;text-align:inherit;resize:vertical;overflow:hidden;white-space:pre-wrap}
+/* Keep rendered text in layout while editing. The textarea overlays it without
+   supplying the browser's default 20-character intrinsic column width. */
+.sima-table .editing .sima-table-cell-view{visibility:hidden}
+.sima-table .editing .sima-table-cell-input{display:block;contain:inline-size;width:0;min-width:100%;align-self:stretch}
+.sima-table-toolbar{position:absolute;z-index:3;right:0;bottom:calc(100% - 1px);display:flex;gap:2px;padding:3px;background:var(--surface,#f7f7f8);border:1px solid var(--border,#ddd);border-radius:6px;opacity:0;visibility:hidden;transition:opacity .12s}
+.sima-table-block:hover>.sima-table-toolbar,.sima-table-block:focus-within>.sima-table-toolbar{opacity:1;visibility:visible}
+.sima-table-toolbar button,.sima-table-menu button{border:0;background:transparent;color:var(--text,#292a2d);font:12px var(--body-font,system-ui);padding:5px 8px;border-radius:3px;cursor:pointer}
+.sima-table-toolbar button:hover,.sima-table-menu button:hover,.sima-table-menu button:focus-visible{background:var(--selection,#d4e3f7);outline:none}
+.sima-table-menu{position:fixed;z-index:1500;display:flex;flex-direction:column;min-width:154px;max-height:calc(100vh - 16px);overflow-y:auto;padding:5px;background:var(--surface,#f7f7f8);border:1px solid var(--border,#ddd);box-shadow:0 8px 24px #0002;border-radius:7px}
+.sima-table-menu button{text-align:left;font-size:13px;padding:6px 10px}
+.sima-table-resize{position:absolute;z-index:2;top:0;bottom:0;right:-4px;width:8px;cursor:col-resize;touch-action:none}
+.sima-table-resize:hover,.sima-table-resize:focus{background:var(--focus,#5c8bcb);opacity:.6;outline:none}
+@media print{.sima-table-toolbar,.sima-table-resize{display:none!important}.sima-table-scroll{overflow:visible}.sima-table .selected{box-shadow:none}.sima-table-cell-input{resize:none}.sima-table-block{break-inside:avoid}}
