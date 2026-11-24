@@ -95,20 +95,8 @@ import WebKit
         try await run("article.querySelector('p').click()")
         try await wait("typeof editor !== 'undefined' && document.activeElement.tagName==='TEXTAREA'")
         guard let web = model.readerWeb else { throw Failure("缺少选区测试视图") }
-        func drag(_ start: (Int,Int), _ end: (Int,Int)) async throws {
-            let points = try await web.evaluateJavaScript("""
-                (() => {
-                  const nodes = [...document.querySelectorAll('.sima-block')].filter(b=>b.dataset.kind!=='blank');
-                  function point(n, offset) {
-                    const el = nodes[n].querySelector('.sima-text-mirror,p');
-                    const r = document.createRange();
-                    r.setStart(el.firstChild,offset);r.collapse(true);
-                    const box = r.getBoundingClientRect();
-                    return [box.x,box.y+box.height/2];
-                  }
-                  return [...point(\(start.0),\(start.1)), ...point(\(end.0),\(end.1))];
-                })()
-                """) as! [Double]
+        func gesture(_ points: [Double]) async throws {
+            guard let web = model.readerWeb else { throw Failure("缺少鼠标测试视图") }
             let types: [NSEvent.EventType] = [.leftMouseDown,.leftMouseDragged,.leftMouseDragged,.leftMouseUp]
             for (i,type) in types.enumerated() {
                 let t = [0.0,0.5,1.0,1.0][i]
@@ -123,6 +111,22 @@ import WebKit
                 }
                 try await Task.sleep(for:.milliseconds(75))
             }
+        }
+        func drag(_ start: (Int,Int), _ end: (Int,Int)) async throws {
+            let points = try await web.evaluateJavaScript("""
+                (() => {
+                  const nodes = [...document.querySelectorAll('.sima-block')].filter(b=>b.dataset.kind!=='blank');
+                  function point(n, offset) {
+                    const el = nodes[n].querySelector('.sima-text-mirror,p');
+                    const r = document.createRange();
+                    r.setStart(el.firstChild,offset);r.collapse(true);
+                    const box = r.getBoundingClientRect();
+                    return [box.x,box.y+box.height/2];
+                  }
+                  return [...point(\(start.0),\(start.1)), ...point(\(end.0),\(end.1))];
+                })()
+                """) as! [Double]
+            try await gesture(points)
         }
         func deleteAndCheck(_ start: Int, _ end: Int) async throws {
             try await wait("Math.min(editor.getState().selection.anchor,editor.getState().selection.head)===\(start) && Math.max(editor.getState().selection.anchor,editor.getState().selection.head)===\(end)")
@@ -150,6 +154,84 @@ import WebKit
             throw Failure("拖选删除并撤销后正文回读失败")
         }
         print("PASS 原生 WebKit 段内、跨段、反向拖选删除与撤销")
+        let rows = ["- 第一，**它不需要免疫动物**。这是截图中带有行内粗体的长列表项。点击第一行或已经换行的文字，都只应该编辑这一项，后面的项目继续保留排版。",
+                    "- 第二，**它的难点和 AbCellera 正好相反**。这里继续使用正文的字号。",
+                    "- 第三，**比较结果**。" + String(repeating:"这一段中文用于测试自动换行后的列表行首位置。",count:4),
+                    "- 第四，**其余文字**保留原来的格式。"]
+        let loose = "## AbCellera 和 Absci 的异同\n\n几点区别：\n\n" + rows.joined(separator:"\n\n\n")
+        let listNote = Entry(kind:.concepts,title:"列表行距",body:loose)
+        try model.store(listNote)
+        model.go(.entry(listNote.id))
+        try await wait("typeof article !== 'undefined' && article.querySelectorAll('li').length===4")
+        func mousePoints(_ script: String) async throws -> [Double] {
+            guard let points = try await model.readerWeb?.evaluateJavaScript("(() => {" + script + "})()") as? [Double]
+            else { throw Failure("无法定位列表项") }
+            return points
+        }
+        // Enter through the reading view, then click the gutter of a different item.
+        try await gesture(mousePoints("""
+          const r=article.querySelectorAll('li')[1].getBoundingClientRect();
+          return [r.left-2,r.top+10,r.left-1,r.top+10];
+        """))
+        try await wait("typeof editor !== 'undefined' && document.activeElement.value===\(try json(rows[1]))")
+        try await run("""
+          editor.goToBeginning();
+          window.glyph=(el,word,skip=0)=>{
+            const tree=document.createTreeWalker(el,NodeFilter.SHOW_TEXT);
+            while(tree.nextNode()){
+              const n=tree.currentNode,i=n.data.indexOf(word);
+              if(i<0)continue;
+              const r=document.createRange();r.setStart(n,i+skip);r.setEnd(n,i+skip+1);
+              return r.getBoundingClientRect();
+            }
+            throw Error('找不到 '+word);
+          };
+          window.thirdPosition=()=>{
+            const b=glyph(document.querySelectorAll('.sima-block li')[2],'第三');
+            const doc=document.querySelector('.sima-document').getBoundingClientRect();
+            return [b.x-doc.x,b.y-doc.y];
+          };
+          window.beforePosition=thirdPosition();
+          window.rowGap=()=>{const rows=document.querySelectorAll('.sima-block li');
+            return rows[2].getBoundingClientRect().top-rows[0].getBoundingClientRect().top};
+          window.gapBefore=rowGap();
+        """)
+        try await gesture(mousePoints("""
+          const r=document.querySelectorAll('.sima-block li')[2].getBoundingClientRect();
+          return [r.left-3,r.top+9,r.left+1,r.top+10];
+        """))
+        try await wait("document.activeElement.value===\(try json(rows[2])) && editor.getState().selection.anchor===editor.getState().selection.head")
+        try await wait("document.querySelectorAll('.sima-block li strong').length===3 && Math.abs(rowGap()-gapBefore)<2")
+        try await wait("thirdPosition().every((v,i)=>Math.abs(v-beforePosition[i])<2) && getComputedStyle(document.querySelectorAll('.sima-block li')[2]).listStyleType==='none' && getComputedStyle(document.querySelectorAll('.sima-block li')[1]).listStyleType!=='none'")
+        try await run("editor.action('insertText','测');editor.action('edit.undo')")
+        try await wait("editor.getText()===\(try json(loose))")
+        try await run("""
+          editor.goToBeginning();
+          window.typeMetrics=()=>['h2','.sima-block p','li p','li strong'].map(s=>{
+            const style=getComputedStyle(document.querySelector(s));
+            return [style.fontSize,style.fontWeight,style.lineHeight].join('/');
+          }).join(',');
+          window.beforeMetrics=typeMetrics();
+          editor.locate(3);
+        """)
+        try await gesture(mousePoints("""
+          const h=glyph(document.querySelector('.sima-text-mirror'),'AbCellera'),
+                p=glyph(document.querySelectorAll('.sima-block li')[1],'第二');
+          return [h.left+.1,h.top+h.height/2,p.right-.1,p.top+p.height/2];
+        """))
+        try await wait("document.activeElement.classList.contains('sima-range-input') && typeMetrics()===beforeMetrics && document.querySelectorAll('.sima-block li strong').length===4 && CSS.highlights.get('sima-selection').size===1")
+        try await wait("editor.getState().selection.anchor===3 && editor.getState().selection.head===editor.getText().indexOf('第二')+1")
+        try await run("""
+          editor.action('insertText','替换');
+          editor.action('edit.undo');
+        """)
+        try await wait("typeMetrics()===beforeMetrics && editor.getText()===\(try json(loose))")
+        try await run("editor.locate(editor.getText().indexOf('第二'))")
+        try await wait("document.activeElement.value===\(try json(rows[1])) && document.querySelectorAll('.sima-block li strong').length===3")
+        guard model.finishInlineNote(), try Files.scan(project.url).resolve(listNote.id)?.body == loose else {
+            throw Failure("单击或撤销改变了列表的原始空行")
+        }
+        print("PASS 原生 WebKit 列表行首轻拖、单项编辑、相邻项间距与 Markdown 回读")
         print("PASS WebKit 正文、Tab/Shift-Tab、段落拆分与软换行、格式、表格、撤销、SVG 拖入、文件回读与原文引文导航")
     }
 }

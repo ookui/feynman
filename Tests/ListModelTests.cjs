@@ -197,4 +197,26 @@ start('- [x] 完成');key('Enter');check(body(),'- [x] 完成\\n- [ ] ','任务�
 start('3.');type('裸编号');check(body(),'3. 裸编号','补齐原始文件里的编号空格');
 start('- A');key('Enter',true);type('续行');check(body(),'- A  \\n  续行','Shift+Enter 保留在项内');
 `,context);
+
+require(path.join(resources,'SimaQ/editor/render.js'));
+const separated='- **重复**\r\n\r\n\r\n- **重复**\r\n  1. 子项\r\n     续行\r\n\r\n-';
+const [listBlock]=SimaRender.parse(separated);
+const listHTML=SimaRender.renderBlock(listBlock,{editableList:true});
+check([...listHTML.matchAll(/data-list-lines="(\d+) (\d+)"/g)].map(match=>match.slice(1)),[
+  ['0','1'],['3','4'],['4','6'],['7','8']
+],'分隔空行留在项外，嵌套项的续行留在项内，空项拥有自己的范围');
+check((listHTML.match(/<strong>重复<\/strong>/g)||[]).length,2,'相同内容各自保留格式');
+
+vm.runInContext(fs.readFileSync(path.join(resources,'text-selection-gesture.js'),'utf8'),context);
+const Gesture=vm.runInContext('TextSelectionGesture',context);
+const press={button:0,detail:1,clientX:100,clientY:100};
+const gesture=new Gesture(press);
+check(gesture.isDrag({...press,clientX:103,clientY:102}),false,'轻移保持单击');
+check(gesture.isDrag(press),false,'轻移后回到原点保持单击');
+check(gesture.shifted,true,'记住发生过轻移，允许收回原生临时选区');
+check(gesture.isDrag({...press,clientX:82}),true,'最后一次事件也参与拖选判断');
+check(gesture.isDrag(press),true,'拖回起点仍是同一次拖选');
+check(Gesture.plainPress(press),true,'普通左键单击');
+for(const extra of [{detail:2},{shiftKey:true},{metaKey:true},{altKey:true},{ctrlKey:true},{button:2}])
+  check(Gesture.plainPress({...press,...extra}),false,'保留系统的多击或修饰键操作');
 console.log(cases+' list checks passed');

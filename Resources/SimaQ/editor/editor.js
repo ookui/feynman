@@ -146,6 +146,7 @@
     }
     function placeField(focus) {
       if (!field) return;
+      alignListMarker();
       const raw=text.slice(active.start,active.end);
       const [a,b]=range().map(n=>normalize(raw.slice(0,clamp(n-active.start,0,raw.length))).length);
       field.setSelectionRange(a,b,selection.head<selection.anchor?'backward':'forward');
@@ -191,6 +192,15 @@
       return list;
     }
     function stamp(b) {b.node.dataset.start=b.start;b.node.dataset.end=b.end;}
+    function alignListMarker() {
+      const measure=active?.markerMeasure;
+      if (!measure?.isConnected) return;
+      const prefix=field.value.match(/^[ \t]*(?:[-+*]|\d+[.)])(?:[ \t]+|$)/)?.[0] || '';
+      if (active.measuredPrefix===prefix) return;
+      active.measuredPrefix=prefix;
+      measure.textContent=prefix;
+      measure.parentElement.style.setProperty('--list-marker-width',measure.getBoundingClientRect().width+'px');
+    }
     function paintInput() {
       if (!field || !mirror) return;
       const raw=text.slice(active.start,active.end);
@@ -238,20 +248,55 @@
         const line=/^([ \t]*)([-+*]|\d+[.)]|>)([ \t]+)(?:\[([ xX])\]([ \t]+))?/.exec(raw);
         const paragraphStyle=line?(line[2]==='>'?'quote':line[4]!==undefined?'task':/^\d/.test(line[2])?'ordered':'bullet'):'';
         active.node.dataset.paragraphStyle=paragraphStyle;
-        const heading=/^(#{1,6})(?:\s|$)/.exec(raw);
+        const heading=['heading','paragraph','blank'].includes(active.type) && /^(#{1,6})(?:[^\S\r\n]|$)/.exec(raw);
         active.node.dataset.heading=heading?heading[1].length:'';
       }
+      alignListMarker();
     }
     function sameHit(a,b) {return !!a && !!b && a.start===b.start && a.length===b.length;}
+    function listParagraph(block,node) {
+      if (!block.listItems || !node) return null;
+      if (!block.lineBounds) {
+        const raw=text.slice(block.start,block.end), starts=[0], ends=[];
+        for (const match of raw.matchAll(/\r\n|\r|\n/g)) {
+          ends.push(match.index);
+          starts.push(match.index+match[0].length);
+        }
+        ends.push(raw.length);
+        block.lineBounds={starts,ends};
+      }
+      const [first,until]=node.dataset.listLines.split(' ').map(Number);
+      return {node,owner:block,type:'list_item',start:block.start+block.lineBounds.starts[first],
+              end:block.start+block.lineBounds.ends[until-1]};
+    }
     function fieldBlock(b, focus) {
+      if (b.listItems) {
+        if (!b.node.firstChild) drawBlock(b);
+        const [lo,hi]=range();
+        for (const node of b.node.querySelectorAll('[data-list-lines]')) {
+          const row=listParagraph(b,node);
+          if (row.start<=lo && hi<=row.end) { b=row; break; }
+        }
+        if (b.listItems && lo!==hi) { openRangeField(focus); return; }
+        b.node.replaceChildren();
+      }
       active=b;activeTable=null;
       b.node.classList.add('sima-active-block');
-      const pair=element('div','sima-text-pair');
+      const pair=element(b.owner?'span':'div','sima-text-pair');
       field=element('textarea',source?'sima-source-input cm-content':'sima-block-input cm-content');
       field.rows=1;field.spellcheck=false;field.setAttribute('aria-label',options.literal?options.path:source?'Markdown 源码':'编辑当前段落');
       // A pre would pick up the theme's code font while the native caret uses the field font.
-      mirror=element('div','sima-text-mirror');mirror.setAttribute('aria-hidden','true');
+      mirror=element(b.owner?'span':'div','sima-text-mirror');mirror.setAttribute('aria-hidden','true');
       field.value=normalize(text.slice(b.start,b.end));
+      const item=b.owner && b.node.closest('li');
+      if (item && (item===b.node || item.firstElementChild===b.node) &&
+          /^[ \t]*(?:[-+*]|\d+[.)])(?:[ \t]+|$)/.test(field.value)) {
+        item.classList.add('sima-source-marker');
+        b.markerMeasure=element('span','sima-marker-measure');
+        b.markerMeasure.setAttribute('aria-hidden','true');
+        pair.classList.add('sima-list-head');
+        pair.append(b.markerMeasure);
+      }
       pair.append(mirror,field);b.node.append(pair);paintInput();placeField(focus);
     }
     function onTableChange(b,next,meta={},ordinal) {
@@ -264,6 +309,7 @@
       shiftBlock(b,next.length-prior.length);
     }
     function shiftBlock(b, delta) {
+      b.lineBounds=null;
       if(!delta) return;
       b.end+=delta;stamp(b);
       if(source)return;
@@ -334,7 +380,7 @@
             else if (direction>0) replace(text.length,text.length,eol()+eol());
           },
         });
-      } else b.node.insertAdjacentHTML('beforeend',window.SimaRender.renderBlock({...b,source:raw}, {...renderOptions,editableImages:true}));
+      } else b.node.insertAdjacentHTML('beforeend',window.SimaRender.renderBlock({...b,source:raw}, {...renderOptions,editableImages:true,editableList:true}));
     }
     // Keep the Markdown blocks themselves intact for caret mapping and live table controls.
     function layoutPageHeader(parent) {
@@ -358,7 +404,12 @@
     }
     function finishBlock() {
       // Only replace the text field leaving focus. Other live controls retain their DOM.
-      const prev=active;if(!prev)return;
+      if (active?.type==='selection') {
+        clearRangeField();
+        active=field=mirror=null;
+        return;
+      }
+      const prev=active?.owner ?? active;if(!prev)return;
       active=null;field=null;mirror=null;
       const freshly=unpack().filter(b=>b.start>=prev.start && b.end<=prev.end);
       if(!freshly.length)return;
@@ -371,6 +422,7 @@
     }
     function draw(edit, focus=false, preferTable=true) {
       closeImagePreview?.(); clearImageSelection();
+      clearRangeField();
       outlineJump=null;
       options.onOutlineChange?.();
       for(const b of blocks)b.table?.destroy();
@@ -386,11 +438,8 @@
       blocks=unpack();
       const desired={...selection};
       const [lo,hi]=range(), start=edit?blockAt(lo):null, end=edit?blockAt(hi):null;
-      if(start && end && start!==end) {
-        const first=blocks.indexOf(start),last=blocks.indexOf(end);
-        blocks.splice(first,last-first+1,{start:start.start,end:end.end,type:'selection'});
-      }
-      const target=edit?blockAt(lo):null;
+      const acrossBlocks=start && end && start!==end;
+      const target=acrossBlocks ? null : start;
       const fragment=document.createDocumentFragment();
       for(const b of blocks) {
         fragment.append(makeBlock(b));
@@ -404,15 +453,18 @@
       endEntry.setAttribute('aria-label','在文末添加段落');
       fragment.append(endEntry);
       doc.replaceChildren(fragment);
+      if (acrossBlocks) openRangeField(false);
       if(target?.table && focus) {
         const inside=target.table.focusAt(desired.anchor-target.start,desired.head-target.start);
         if(!inside) {pick(desired.anchor,desired.head);draw(true,focus,false);return;}
       } else if(field)placeField(focus);
       highlightRendered();
+      paintRangeSelection();
     }
     function choose(a,b=a,focus=true,preferTable=true) {
       pick(a,b);
-      if(field && active && Math.min(a,b)>=active.start && Math.max(a,b)<=active.end && !activeTable) {
+      if(field && active && !active.listItems && active.type!=='selection' &&
+         Math.min(a,b)>=active.start && Math.max(a,b)<=active.end && !activeTable) {
         placeField(focus);return;
       }
       draw(true,focus,preferTable);
@@ -427,7 +479,14 @@
       let a=active.start+rawOffset(next,field.selectionStart),b=active.start+rawOffset(next,field.selectionEnd);
       if(field.selectionDirection==='backward')[a,b]=[b,a];
       write(active.start+l,active.start+r,ins,{anchor:a,head:b});
-      shiftBlock(active,next.length-raw.length);paintInput();
+      if (active.type==='selection') {
+        draw(true,true);
+        reveal();
+        return;
+      }
+      const delta=next.length-raw.length;
+      if (active.owner) active.end+=delta;
+      shiftBlock(active.owner ?? active,delta);paintInput();
       if(!source && (d.inserted.includes('\n') || before.slice(d.from,d.oldEnd).includes('\n'))) {
         const parsed=unpack(), focusBlock=parsed.find(v=>selection.head>=v.start&&selection.head<=v.end);
         if(focusBlock && (focusBlock.start!==active.start || focusBlock.end!==active.end || focusBlock.type==='table')) draw(true,true);
@@ -438,8 +497,9 @@
       const el=node?.nodeType===1?node:node?.parentElement;
       const wrapper=el?.closest('.sima-block');
       if(!wrapper || !doc.contains(wrapper))return null;
-      const b=blocks.find(x=>x.node===wrapper);
+      let b=blocks.find(x=>x.node===wrapper);
       if(!b)return null;
+      b=listParagraph(b,el.closest('[data-list-lines]')) ?? b;
       if(el.closest('textarea'))return b.start;
       const mapped=mapNodes(b);
       const found=mapped.find(x=>x.node===node);
@@ -464,7 +524,8 @@
       const walker=document.createTreeWalker(b.node,NodeFilter.SHOW_TEXT);
       while(walker.nextNode()) {
         const node=walker.currentNode, parent=node.parentElement;
-        if(parent.closest('button,textarea,.sima-image-caption,.sima-text-mirror,.sima-table-toolbar,svg,math'))continue;
+        if (active?.owner===b && mirror?.contains(node)) {cursor=active.end-b.start;continue;}
+        if(parent.closest('button,textarea,.sima-image-caption,.sima-text-mirror,.sima-marker-measure,.sima-table-toolbar,svg,math'))continue;
         const str=node.data;
         // Markdown-it inserts formatting newlines between block elements.
         // Mapping those to source offsets skips the first row or list item.
@@ -484,6 +545,61 @@
         }
       }
       return result;
+    }
+    // Keep cross-paragraph selections in the rendered document. The textarea
+    // handles native editing, clipboard and IME with the original source offsets.
+    function clearRangeField() {
+      if (active?.type!=='selection') return;
+      window.CSS?.highlights?.delete('sima-selection');
+      active.preedit?.remove();
+      field.remove();
+    }
+    function openRangeField(focus) {
+      field=element('textarea','sima-range-input');
+      field.setAttribute('aria-label','编辑所选文字');
+      field.spellcheck=false;
+      field.wrap='off';
+      field.value=normalize(text);
+      active={type:'selection',start:0,end:text.length,node:field};
+      activeTable=mirror=null;
+      viewport.append(field);
+      placeField(focus);
+      if (focus) paintRangeSelection();
+    }
+    function renderedBoundary(at) {
+      let b=blockAt(at);
+      if (b.listItems) {
+        for (const node of b.node.querySelectorAll('[data-list-lines]')) {
+          const row=listParagraph(b,node);
+          if (row.start<=at && at<=row.end) { b=row; break; }
+        }
+      }
+      if (at<=b.start) return [b.node,0];
+      if (at>=b.end) return [b.node,b.node.childNodes.length];
+      const offset=at-b.start;
+      for (const {node,positions} of mapNodes(b)) {
+        if (positions.at(-1)<offset) continue;
+        return [node,positions.findIndex(p=>p>=offset)];
+      }
+      return [b.node,b.node.childNodes.length];
+    }
+    function paintRangeSelection() {
+      if (active?.type!=='selection') return;
+      const [lo,hi]=range(), span=document.createRange();
+      span.setStart(...renderedBoundary(lo));
+      span.setEnd(...renderedBoundary(hi));
+      if (window.CSS?.highlights && window.Highlight) {
+        CSS.highlights.set('sima-selection',new Highlight(span));
+      } else {
+        const dom=window.getSelection();
+        dom.removeAllRanges();
+        dom.addRange(span);
+      }
+      const caret=span.cloneRange();
+      caret.collapse(true);
+      const rect=caret.getBoundingClientRect(), view=viewport.getBoundingClientRect();
+      field.style.left=clamp(rect.left-view.left,0,Math.max(0,viewport.clientWidth-1))+'px';
+      field.style.top=viewport.scrollTop+clamp(rect.top-view.top,0,Math.max(0,viewport.clientHeight-1))+'px';
     }
     function highlightRendered() {
       for(const mark of doc.querySelectorAll('mark[data-editor-hit]'))mark.replaceWith(...mark.childNodes);
@@ -645,10 +761,10 @@
       const a=clamp(Math.trunc(start)||0,0,text.length),b=clamp(a+(Math.trunc(length)||0),0,text.length);
       if(b>a) {currentHit={start:a,length:b-a};if(!hits.some(h=>sameHit(h,currentHit)))hits=[currentHit];}
       choose(a,b,true,true);
-      paintInput();highlightRendered();
+      paintInput();highlightRendered();paintRangeSelection();
       if (Number.isFinite(viewportY)) {
         const rect=caretRect(a) || doc.querySelector('td.editing,th.editing')?.getBoundingClientRect() || blockAt(a)?.node.getBoundingClientRect();
-        if(rect) viewport.scrollTop+=rect.top-viewportY;
+        if(rect) viewport.scrollTop+=rect.top+rect.height/2-viewportY;
       } else reveal('center');
     }
     function goToBeginning(ranges = []) {
@@ -706,7 +822,6 @@
       const nodes=new Map(blocks.map(b=>[b.start,b.node]));
       return items.flatMap(h=>{
         const block=nodes.get(h.start);
-        if (active?.type==='selection' && h.start>=active.start && h.start<=active.end) return [h];
         if (!block) return [];
         const heading=block.querySelector('h1,h2,h3,h4,h5,h6');
         return [{...h,title:heading?.textContent || h.title,node:heading || block}];
@@ -738,7 +853,7 @@
     function setHighlights(ranges,current) {
       hits=(Array.isArray(ranges)?ranges:[]).filter(h=>Number.isFinite(h.start)&&h.length>0);
       currentHit=typeof current==='number'?hits[current]:current || hits.find(h=>sameHit(h,currentHit));
-      paintInput();highlightRendered();
+      paintInput();highlightRendered();paintRangeSelection();
     }
     function chooseTableSize() {
       if(chooser){chooser.querySelector('input').focus();return;}
@@ -884,17 +999,20 @@
     }
     function editAtClick(b,caret,anchor,head) {
       const line=caret?.getBoundingClientRect();
-      const blockTop=b.node.getBoundingClientRect().top;
+      const target=caret?.startContainer;
+      const row=(target?.parentElement?.closest('[data-list-lines]')) ?? b.node;
+      const blockTop=row.getBoundingClientRect().top;
       // An edit can change Markdown structure or reference definitions in other blocks.
+      const previousBlock=active?.owner ?? active;
       if (anchor<b.start || head<b.start || anchor>b.end || head>b.end || b.table ||
-          (active && (active===b || active.source!==text.slice(active.start,active.end)))) {
+          (previousBlock && (previousBlock===b || previousBlock.source!==text.slice(previousBlock.start,previousBlock.end)))) {
         choose(anchor,head,true,false);
       } else {
         const previous=active;
         finishBlock();
         pick(anchor,head);
         outlineJump=null;
-        b.node.replaceChildren();
+        if (!b.listItems) b.node.replaceChildren();
         if(b.type==='yaml')yamlButton(b);
         fieldBlock(b,true);
         if(previous && hits.length) highlightRendered();
@@ -902,6 +1020,7 @@
       }
       // Rendered lists and wrapped links can have a very different height in source.
       // Keep the clicked line at the same screen coordinate after layout and focus.
+      if (active?.type==='selection') return;
       const editedLine=line?.height ? caretRect(head) : null;
       if(editedLine?.height) viewport.scrollTop+=editedLine.top-line.top;
       else if(active) viewport.scrollTop+=active.node.getBoundingClientRect().top-blockTop;
@@ -1203,14 +1322,40 @@
       if(e.target===field)readField();
       beforeSelection={...selection};composing=true;viewport.classList.add('sima-composing');
     });
+    on(viewport,'compositionupdate',e=>{
+      if (e.target!==field || active?.type!=='selection') return;
+      if (!active.preedit) {
+        active.preedit=element('span','sima-range-preedit');
+        active.preedit.setAttribute('aria-hidden','true');
+        active.preedit.style.left=field.style.left;
+        active.preedit.style.top=field.style.top;
+        viewport.append(active.preedit);
+      }
+      active.preedit.textContent=e.data;
+    });
     on(viewport,'compositionend',e=>{
+      active?.preedit?.remove();
+      if (active) active.preedit=null;
       composing=false;viewport.classList.remove('sima-composing');if(e.target===field)inputChange();
       const commands=pendingActions;pendingActions=[];
       queueMicrotask(()=>{if(!destroyed)commands.forEach(f=>f());});
     });
     on(viewport,'input',e=>{if(e.target===field && !e.isComposing)inputChange();});
-    on(viewport,'select',e=>{if(e.target===field&&!composing)readField();}, {capture:true});
+    on(viewport,'select',e=>{
+      if(e.target!==field || composing) return;
+      readField();paintRangeSelection();
+    }, {capture:true});
+    // A cross-item selection temporarily uses one field. Return to the selected
+    // paragraph when a click or an arrow key collapses that range to a caret.
+    function narrowSelectionField(e) {
+      if (e.target!==field || !field || composing || field.selectionStart!==field.selectionEnd ||
+          !(active?.listItems || active?.type==='selection')) return;
+      readField();
+      draw(true,true);
+    }
+    on(viewport,'keyup',e=>{if(e.key.startsWith('Arrow')) narrowSelectionField(e);});
     on(viewport,'click',e=>{
+      if (e.target===field) {narrowSelectionField(e);return;}
       if(!source && !composing && e.button===0 && e.target.closest('.sima-end-entry')) {
         e.preventDefault();
         clearImageSelection();
@@ -1238,9 +1383,14 @@
       if(!b)return;
       if(b.type==='yaml' && !e.target.closest('.md-meta-block')) return;
       if(e.target.matches('input[type=checkbox]')){
-        const checks=[...box.querySelectorAll('input[type=checkbox]')], raw=text.slice(b.start,b.end);
-        const m=[...raw.matchAll(/^[ \t]*(?:[-*+]|\d+[.)])\s+\[([ xX])\]/gm)][checks.indexOf(e.target)];
-        if(m){const pos=b.start+m.index+m[0].lastIndexOf('[')+1;write(pos,pos+1,m[1]===' '?'x':' ',{anchor:pos,head:pos});draw(false);}
+        const paragraph=e.target.closest('[data-list-lines]');
+        // An item being edited has a text field instead of a visible checkbox.
+        // Resolve list checkboxes by source row, including repeated task text.
+        const row=listParagraph(b,paragraph);
+        const raw=text.slice(row?.start ?? b.start,row?.end ?? b.end);
+        const checks=[...(row?.node ?? box).querySelectorAll('input[type=checkbox]')];
+        const m=[...raw.matchAll(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+\[([ xX])\]/gm)][checks.indexOf(e.target)];
+        if(m){const pos=(row?.start ?? b.start)+m.index+m[0].lastIndexOf('[')+1;write(pos,pos+1,m[1]===' '?'x':' ',{anchor:pos,head:pos});draw(false);}
         return;
       }
       const dom=window.getSelection();
@@ -1252,10 +1402,10 @@
           editAtClick(b,caret,anchor,head);return;
         }
       }
-      const caret=rangeAtPoint(e.clientX,e.clientY);
-      const inside=caret && box.contains(caret.startContainer);
-      const point=inside ? sourcePoint(caret.startContainer,caret.startOffset) : b.start;
-      editAtClick(b,inside ? caret : null,point??b.start,point??b.start);
+      const hit=renderedEndpoint(e.clientX,e.clientY,e.target);
+      const inside=hit && box.contains(hit.caret.startContainer);
+      const point=inside ? hit.offset : b.start;
+      editAtClick(b,inside ? hit.caret : null,point,point);
     });
     on(viewport,'focusin',e=>{
       if(e.target===viewport && !pointerFocusing && viewport.matches(':focus-visible') && !field && !composing && !activeTable)focus();
@@ -1292,12 +1442,24 @@
       }
       if(source)return;
       const direction=['ArrowUp','ArrowLeft'].includes(key)?-1:['ArrowDown','ArrowRight'].includes(key)?1:0;
+      if (direction && active.type==='selection') {
+        // Native movement adjusts the textarea's real source range. A collapsed
+        // result returns to its own paragraph on keyup.
+        return;
+      }
       if(direction) {
         const pos=selection.head,atEdge=direction<0?pos===active.start:pos===active.end;
         const oneLine=!field.value.includes('\n') && field.clientHeight<parseFloat(getComputedStyle(field).lineHeight)*1.8;
         if(atEdge || oneLine && ['ArrowUp','ArrowDown'].includes(key)){
-          const idx = blocks.indexOf(active);
+          const owner=active.owner ?? active, idx=blocks.indexOf(owner);
+          const adjacent=active.owner && (direction<0 ? active.start>owner.start : active.end<owner.end);
           const neighbor = direction < 0 ? blocks.slice(0,idx).reverse().find(b=>!b.node.hidden) : blocks.slice(idx+1).find(b=>!b.node.hidden);
+          if (adjacent) {
+            const edge=direction<0 ? active.start : active.end;
+            const gap=direction<0 ? text.slice(owner.start,edge).match(/\s*$/)[0] : text.slice(edge,owner.end).match(/^\s*/)[0];
+            const n=edge+direction*Math.max(1,gap.length);
+            e.preventDefault();choose(e.shiftKey ? selection.anchor : n,n,true,false);reveal();return;
+          }
           if(neighbor){
             e.preventDefault();
             const n=direction<0?neighbor.end:neighbor.start;
@@ -1374,11 +1536,33 @@
       }
       if (failure) (options.onError || window.alert)(String(failure.message || failure));
     }
+    function renderedEndpoint(x,y,target) {
+      let caret=rangeAtPoint(x,y);
+      const box=target?.closest('.sima-block');
+      if (box && target.matches('li,ul,ol,.sima-block') && box.querySelector('[data-list-lines]')) {
+        // The bullet and the padding before it are outside the text box. WebKit's
+        // nearest caret there can belong to another item or to a formatting newline.
+        const row=[...box.querySelectorAll('[data-list-lines]')].find(node=>{
+          const rect=node.getBoundingClientRect();
+          return y>=rect.top && y<rect.bottom && x<=rect.left;
+        });
+        if (row) {
+          const rect=row.getBoundingClientRect();
+          caret=rangeAtPoint(rect.left+1,y);
+          if (!caret || !row.contains(caret.startContainer)) {
+            caret=document.createRange();caret.selectNodeContents(row);caret.collapse(true);
+          }
+        }
+      }
+      if (!caret) return null;
+      const offset=target?.closest('.sima-end-entry') ? text.length : sourcePoint(caret.startContainer,caret.startOffset);
+      return offset==null ? null : {caret,offset};
+    }
     // A textarea exposes no text nodes to hit testing. Its typesetting mirror has
     // the same line breaks and lets both drops and text drags resolve a source offset.
     function textEndpoint(x, y) {
       const target = document.elementFromPoint(x, y);
-      if (field && target === field) {
+      if (field && mirror && target === field) {
         field.style.pointerEvents = 'none';
         mirror.style.pointerEvents = 'auto';
         mirror.style.webkitUserSelect = 'text';
@@ -1396,10 +1580,7 @@
           mirror.style.removeProperty('-webkit-user-select');
         }
       }
-      const caret = rangeAtPoint(x,y);
-      if (!caret) return null;
-      const offset = target?.closest('.sima-end-entry') ? text.length : sourcePoint(caret.startContainer,caret.startOffset);
-      return offset == null ? null : {caret, offset};
+      return renderedEndpoint(x,y,target);
     }
     function imageDropPoint(e) {
       if (e.target.closest('.sima-end-entry')) return text.length;
@@ -1429,7 +1610,7 @@
     },{capture:true});
     // Keep native character/word selection within a field. Across blocks WebKit
     // gives the textarea and the article separate selections, so track the two
-    // endpoints until mouseup, then give the whole range to one editable field.
+    // endpoints until mouseup, then preserve the range over the formatted blocks.
     let textDrag = null, consumeDragClick = false;
     function clearTextDrag() {
       textDrag = null;
@@ -1439,17 +1620,20 @@
     on(viewport,'mousedown',e=>{
       clearTextDrag();
       consumeDragClick = false;
-      if (source || composing || e.button !== 0 || e.ctrlKey || e.shiftKey ||
+      if (source || composing || !TextSelectionGesture.plainPress(e) ||
           !e.target.closest('.sima-block') || e.target.closest('button,input,a,.sima-table-block,.sima-sized-image,dialog')) return;
       const start = textEndpoint(e.clientX,e.clientY);
-      if (start) textDrag = {start, field:e.target === field, x:e.clientX, y:e.clientY};
+      if (start && active?.type==='selection') window.CSS?.highlights?.delete('sima-selection');
+      if (start) textDrag = {start, field:e.target === field, gesture:new TextSelectionGesture(e)};
     });
     function dragEndpoint(e) {
-      if (!textDrag || Math.hypot(e.clientX-textDrag.x,e.clientY-textDrag.y) < 3) return null;
+      if (!textDrag.gesture.isDrag(e) || !textDrag.start.caret.startContainer.isConnected) return null;
       if (!textDrag.crossed && textDrag.field && document.elementFromPoint(e.clientX,e.clientY) === field) return null;
       return textEndpoint(e.clientX,e.clientY);
     }
     on(document,'mousemove',e=>{
+      if (!textDrag) return;
+      if (!(e.buttons & 1)) {clearTextDrag();return;}
       const end = dragEndpoint(e);
       if (!end || end.offset === textDrag.start.offset) return;
       textDrag.crossed = true;
@@ -1463,9 +1647,18 @@
     });
     on(document,'mouseup',e=>{
       if (!textDrag || e.button !== 0) return;
-      const start = textDrag.start, end = dragEndpoint(e);
+      const drag=textDrag, start=drag.start, end=dragEndpoint(e);
       clearTextDrag();
-      if (!end || start.offset === end.offset) return;
+      if (!drag.gesture.moved) {
+        if (!drag.gesture.shifted || !start.caret.startContainer.isConnected) return;
+        // A click straddling a wrapped-line boundary can select a whole line
+        // natively even when the pointer moved only one pixel.
+        consumeDragClick=true;
+        if (drag.field) choose(start.offset);
+        else editAtClick(blockAt(start.offset),start.caret,start.offset,start.offset);
+        return;
+      }
+      if (!end) return;
       consumeDragClick = true;
       choose(start.offset,end.offset,true,false);
     });
@@ -1491,7 +1684,7 @@
         }
       },
       html:()=>options.literal ? '<pre>'+escape(text)+'</pre>' : window.SimaRender.exportWithDiagrams(text,renderOptions),
-      destroy(){destroyed=true;closeImagePreview?.();clearImageSelection();mathView?.destroy();detachScrollbar();filePreview?.destroy();events.abort();visibility.disconnect();for(const b of blocks)b.table?.destroy();host.replaceChildren();}
+      destroy(){destroyed=true;closeImagePreview?.();clearImageSelection();clearRangeField();mathView?.destroy();detachScrollbar();filePreview?.destroy();events.abort();visibility.disconnect();for(const b of blocks)b.table?.destroy();host.replaceChildren();}
     };
   }
   window.SimaEditor={create};

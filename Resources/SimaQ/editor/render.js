@@ -335,6 +335,25 @@
     if(/^\s*\[toc\]\s*$/i.test(src)) return '<nav class="sima-toc">'+(env.headings||[]).map(h=>'<div class="sima-toc-level-'+h.level+'"><a href="#'+esc(h.id)+'">'+esc(h.title)+'</a></div>').join('')+'</nav>';
     if(block.type==='definition') return '<div class="sima-definition">'+esc(src)+'</div>';
     if(block.type==='yaml') return '<pre class="md-meta-block">'+esc(src)+'</pre>';
+    if (options.editableList && block.listItems) {
+      // Keep Markdown-it’s list tree and numbering. Give each text paragraph a
+      // source range, including tight-list paragraphs whose tags are normally hidden.
+      const tokens=md.parse(src,env), parents=[];
+      for (const [i,t] of tokens.entries()) {
+        if (t.nesting!==1) continue;
+        parents[t.level]=t.type;
+        if (t.type==='paragraph_open' && parents[t.level-1]==='list_item_open') {
+          if (t.hidden) {
+            t.attrJoin('class','sima-tight-item');
+            t.hidden=tokens[i+2].hidden=false; // paragraph_open, inline, paragraph_close
+          }
+          t.attrSet('data-list-lines',t.map.join(' '));
+        } else if (t.type==='list_item_open' && tokens[i+1]?.type==='list_item_close') {
+          t.attrSet('data-list-lines',t.map[0]+' '+(t.map[0]+1));
+        }
+      }
+      return md.renderer.render(tokens,md.options,env);
+    }
     const result=md.render(src,env);
     return block.type==='heading' && block.anchor ? result.replace(/<h([1-6])>/,'<h$1 id="'+esc(block.anchor)+'">') : result;
   }

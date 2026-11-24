@@ -862,6 +862,13 @@ article.addEventListener('click', event => {
   }
   if (state?.editable === false || event.detail > 1 || event.target.closest('button,details,mark[role=button]') || !getSelection().isCollapsed) return;
   let block = event.target;
+  if (block.matches('ul,ol')) {
+    const item=[...block.querySelectorAll('li')].findLast(el=>{
+      const rect=el.getBoundingClientRect();
+      return event.clientY>=rect.top && event.clientY<rect.bottom;
+    });
+    if (item) block=item;
+  }
   while (block !== article && !editableSpan(block)) block = block.parentElement;
   const line=tableLineInGap(event);
   if (line) { line.click(); return; }
@@ -877,6 +884,7 @@ article.addEventListener('click', event => {
     cell.end = span.start + (info.end ?? 0);
   }
   let offset = cell?.start ?? span.start;
+  let viewportY = event.clientY;
   const caret = document.caretRangeFromPoint(event.clientX, event.clientY);
   if (caret && block.contains(caret.startContainer)) {
     const nodes = document.createTreeWalker(cell ? td : block, NodeFilter.SHOW_TEXT);
@@ -884,15 +892,20 @@ article.addEventListener('click', event => {
     while (nodes.nextNode()) {
       const node = nodes.currentNode, at = state.body.indexOf(node.data, cursor);
       if (at < 0 || at + node.length > (cell?.end ?? span.end)) continue;
-      if (node === caret.startContainer) { offset = at + caret.startOffset; break; }
+      if (node === caret.startContainer) {
+        offset = at + caret.startOffset;
+        const rect = caret.getBoundingClientRect();
+        if (rect.height) viewportY = rect.top + rect.height / 2;
+        break;
+      }
       cursor = at + node.length;
     }
   }
   if (cell) cell.caret = offset-cell.start;
-  if (activeBlock || state.editID) requestBlock(offset,event.clientY,cell);
+  if (activeBlock || state.editID) requestBlock(offset,viewportY,cell);
   else editTimer = setTimeout(() => {
     if (!getSelection().isCollapsed) return;
-    send({action:'rich', start:offset, viewportY:event.clientY});
+    send({action:'rich', start:offset, viewportY});
   }, state.extract ? (state.doubleClickDelay ?? 350) : 0);
 });
 let scrollTimer;

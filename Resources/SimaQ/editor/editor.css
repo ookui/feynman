@@ -1,4 +1,5 @@
 .sima-editor {
+  position: relative;
   height: 100%;
   overflow: auto;
   overscroll-behavior: contain;
@@ -231,6 +232,34 @@
 .sima-block[data-paragraph-style="quote"] .sima-text-pair { border-inline-start: 3px solid var(--accent); padding-inline-start: 1em; color: var(--muted); }
 .sima-block[data-paragraph-style="quote"] textarea { inset-inline-start: 1em; width: calc(100% - 1em); }
 .sima-block:is([data-paragraph-style="bullet"],[data-paragraph-style="task"],[data-paragraph-style="ordered"]) .sima-text-pair { margin-inline-start: .5em; }
+.sima-document p.sima-tight-item, .sima-document [data-list-lines] > .sima-text-pair { margin: 0; }
+.sima-document li.sima-source-marker { list-style-type: none; }
+.sima-document [data-list-lines] > .sima-list-head {
+  display: inline-grid;
+  vertical-align: top;
+  width: calc(100% + var(--list-marker-width, 0px));
+  margin-inline-start: calc(0px - var(--list-marker-width, 0px));
+}
+.sima-list-head > :is(.sima-text-mirror, textarea) {
+  padding-inline-start: var(--list-marker-width, 0px);
+  text-indent: calc(0px - var(--list-marker-width, 0px));
+}
+.sima-marker-measure {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  white-space: pre;
+  tab-size: 4;
+}
+.sima-range-input {
+  position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;
+  padding: 0; border: 0; resize: none; overflow: hidden; font: inherit;
+}
+.sima-editor ::highlight(sima-selection) { background-color: var(--selection, Highlight); }
+.sima-range-preedit {
+  position: absolute; z-index: 1; pointer-events: none; white-space: pre-wrap;
+  background: var(--bg); color: var(--text); text-decoration: underline;
+}
 
 .sima-references { max-width:var(--content-width); margin:0 auto; padding:0 clamp(20px,4vw,48px) 2rem; color:var(--text); font:var(--font-size)/1.5 var(--body-font); }
 .sima-references summary { border-top:1px solid var(--border); padding:.8em 0; cursor:pointer; font-weight:600; }

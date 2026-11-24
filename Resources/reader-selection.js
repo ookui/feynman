@@ -289,16 +289,18 @@ function renderedCaretAt(sourceOffset) {
 let paragraphDrag=null;
 document.addEventListener('mousedown',event=>{
   paragraphDrag=null;
-  if (event.button!==0 || !activeBlock || activeBlock.composing || !article.contains(event.target) ||
-      event.target.closest('button,details,.sima-table-block')) return;
-  paragraphDrag={edit:activeBlock,x:event.clientX,y:event.clientY,scroll:scrollY,
-    fromField:!activeBlock.grid && event.target===activeBlock.field};
+  if (!TextSelectionGesture.plainPress(event) ||
+      activeBlock?.composing || !article.contains(event.target) ||
+      event.target.closest('a,button,input,details,.sima-table-block,mark[role=button]')) return;
+  paragraphDrag={edit:activeBlock,gesture:new TextSelectionGesture(event),scroll:scrollY,
+    fromField:activeBlock && !activeBlock.grid && event.target===activeBlock.field};
 },true);
 document.addEventListener('mousemove',event=>{
   const drag=paragraphDrag;
-  if (!drag || !pointerDown) return;
+  if (!drag || !pointerDown || !(event.buttons & 1)) return;
+  if (!drag.gesture.isDrag(event) || !drag.edit) return;
   if (!drag.anchor) {
-    if (activeBlock!==drag.edit || Math.hypot(event.clientX-drag.x,event.clientY-drag.y)<4) return;
+    if (activeBlock!==drag.edit) return;
     const holder=drag.edit.holder;
     const current=document.elementFromPoint(event.clientX,event.clientY);
     if (drag.fromField && holder.contains(current)) return;
@@ -306,11 +308,24 @@ document.addEventListener('mousemove',event=>{
     const sourceOffset=drag.fromField ? fieldStart(drag.edit)+
       (field.selectionDirection==='backward' ? field.selectionEnd : field.selectionStart) : null;
     closeBlock(false,false);
-    drag.anchor=(sourceOffset===null ? null : renderedCaretAt(sourceOffset)) ?? document.caretRangeFromPoint(drag.x,drag.y+drag.scroll-scrollY);
+    drag.anchor=(sourceOffset===null ? null : renderedCaretAt(sourceOffset)) ?? document.caretRangeFromPoint(drag.gesture.x,drag.gesture.y+drag.scroll-scrollY);
   }
   const tip=document.caretRangeFromPoint(event.clientX,event.clientY);
   if (!drag.anchor || !tip || !article.contains(drag.anchor.startContainer) || !article.contains(tip.startContainer)) return;
   event.preventDefault();
   getSelection().setBaseAndExtent(drag.anchor.startContainer,drag.anchor.startOffset,tip.startContainer,tip.startOffset);
 },true);
-document.addEventListener('mouseup',()=>{paragraphDrag=null;},true);
+document.addEventListener('mouseup',event=>{
+  const drag=paragraphDrag;
+  paragraphDrag=null;
+  if (!drag || drag.gesture.isDrag(event) || !drag.gesture.shifted) return;
+  if (drag.fromField && drag.edit===activeBlock) {
+    const field=activeBlock.field;
+    const at=field.selectionDirection==='backward' ? field.selectionEnd : field.selectionStart;
+    field.setSelectionRange(at,at);
+  } else {
+    const selection=getSelection();
+    if (!selection.isCollapsed) selection.collapse(selection.anchorNode,selection.anchorOffset);
+  }
+},true);
+window.addEventListener('blur',()=>{paragraphDrag=null;});
