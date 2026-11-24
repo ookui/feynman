@@ -109,6 +109,23 @@ private final class LinkFixture: URLProtocol {
         try check(model.passage.isEmpty && model.focus == nil && model.snapshot.owners(of: [anchor]).isEmpty, "自动移除最后一个高亮来源")
         try check(model.snapshot.deletedIDs.contains("old-question"), "旧编号正文链接失效")
 
+        var cited = Entry(kind: .concepts, title: "原文出处")
+        var shared = Entry(kind: .entities, title: "共同引用")
+        let secondQuote = Anchor(report: anchor.report, quote: "市场")
+        cited.anchors = [anchor, secondQuote]
+        cited.reportLinks = [anchor.report]
+        shared.anchors = [anchor]
+        try model.store(cited)
+        try model.store(shared)
+        try model.removeSourceRelation(.quote(anchor), from: cited.id)
+        try check(model.snapshot.owners(of: [anchor]).map(\.id) == [shared.id] &&
+                  model.snapshot.resolve(cited.id)?.anchors == [secondQuote], "逐条解除共享引文")
+        try model.removeSourceRelation(.document(anchor.report), from: cited.id)
+        let reopened = try Files.scan(project.url)
+        try check(reopened.resolve(cited.id)?.reportLinks == [] && reopened.resolve(cited.id)?.anchors == [] &&
+                  reopened.owners(of: [anchor]).map(\.id) == [shared.id], "整篇解除后重开仍保留其他条目的划线")
+        try check(try model.text(anchor.report) == anchor.quote, "解除出处应保留报告原文")
+
         var external = Entry(kind: .concepts, title: "同步概念")
         external.links = [entity.id]
         try Files.write(external, in: project.url)
@@ -135,6 +152,33 @@ private final class LinkFixture: URLProtocol {
             try check(!model.snapshot.isWebReference(item) && model.snapshot.archiveSources(for: item) == [source], "本地资料独立展示并可入库")
             try check(fm.contentsEqual(atPath: file.path, andPath: root.appendingPathComponent(item.title).path), "原件内容应完全一致")
         }
+        let picture = imported.first { $0.title == "图.svg" }!, pdf = imported.first { $0.title == "报告.pdf" }!
+        var illustrated = Entry(kind: .concepts, title: "插图", body: "![图](assets/figure.png)")
+        illustrated.links = [pdf.id, picture.id]
+        try model.store(illustrated)
+        let inlinePath = "project:concepts/assets/figure.png"
+        func graph() -> ProjectGraphData { ProjectGraphData(model.snapshot, hidden: model.hiddenGraphFilters) }
+        func paths() -> Set<String> { Set(graph().nodes.map(\.path)) }
+        let initiallyVisible = paths()
+        try check(initiallyVisible.contains(illustrated.path) &&
+                  initiallyVisible.isDisjoint(with: [inlinePath, picture.path, pdf.path, anchor.report]), "默认筛选")
+        model.toggleGraphFilter(.images)
+        try check(paths().isSuperset(of: [picture.path, inlinePath]) && !paths().contains(pdf.path), "图片和参考资料分别筛选")
+        model.toggleGraphFilter(.report)
+        let visibleGraph = graph()
+        let connections = visibleGraph.edges.map { $0.map { visibleGraph.nodes[$0].path } }
+        try check(connections.contains([illustrated.path, picture.path]) &&
+                  connections.contains([illustrated.path, inlinePath]) &&
+                  connections.contains([shared.path, anchor.report]) && !connections.contains([cited.path, anchor.report]), "仅保留两端可见的有效关联")
+        let secondProject = try Files.create(root, title: "筛选隔离", intent: "")
+        model.open(secondProject)
+        try check(model.hiddenGraphFilters == PageCategory.defaultHiddenGraphFilters, "新项目独立筛选")
+        model.open(project)
+        try check(graph() == visibleGraph, "重新打开项目恢复筛选和图中关系")
+        let freshWorkspace = Workspace()
+        freshWorkspace.open(project)
+        try check(freshWorkspace.hiddenGraphFilters == model.hiddenGraphFilters, "重新启动恢复项目筛选")
+
         guard var mixed = imported.first(where: { $0.title.hasSuffix(".html") }) else { throw Failure("HTML 文件未导入") }
         mixed.body = "[来源](https://example.org/other)"
         try model.store(mixed)

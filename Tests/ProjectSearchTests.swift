@@ -58,7 +58,19 @@ import PDFKit
         let hits = model.searchHits
         try check(hits.count == 3 && hits.first?.item.target == .entry(headline.id), "标题优先、混输、间隔词、跨行与已删过滤")
         try check(hits.contains { $0.item.target == .entry(note.id) && $0.snippet?.contains("資本開支") == true }, "正文原文片段")
+        let titlePieces = hits.first!.titleRanges.map { (headline.title as NSString).substring(with: $0) }
+        try check(titlePieces == ["AI", "资本开支"], "模糊标题只高亮实际命中的词")
+        let bodyHit = hits.first { $0.item.target == .entry(note.id) }
+        try check(bodyHit?.occurrences.map(\.match) == ["ＡＩ", "資本開支"], "正文命中保留原字形及准确范围")
         let index = model.searchIndex
+        let partial = index.results("AI 展望").first
+        try check(partial?.occurrences.map(\.match).contains("展望") == true &&
+                  partial?.titleRanges == [NSRange(location: 0, length: 2)], "跨标题和正文的命中分别高亮")
+        var regex = ProjectSearchOptions()
+        regex.isRegex = true
+        let regexHit = index.results("基.设施|开支", options: regex).first { $0.item.target == .entry(headline.id) }
+        try check(regexHit?.titleRanges.map { (headline.title as NSString).substring(with: $0) } == ["基础设施", "开支"], "正则的全部标题命中")
+
         try check(index.results(" AI資本開支  ").count == 3, "无空格的中英混搜")
         try check(index.results("ＯＰＥＮ ai").contains { $0.item.target == .entry(headline.id) }, "空格、标点、大小写与全半角")
         try check(index.results("开支 AI").count == 3, "交换关键词次序")

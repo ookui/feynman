@@ -181,6 +181,7 @@ import WebKit
         """#)
         guard lists as? Bool == true else { throw Failure("列表编辑测试失败") }
         print("列表通过：输入符号、同级回车、编辑文字对齐、缩进、退回正文和子项归属")
+        try await checkGraphRedraw(web, resources: resources)
         if CommandLine.arguments.contains("--terminal") {
             let root=fm.temporaryDirectory.appendingPathComponent("Feynman-Smoke-" + UUID().uuidString)
             try fm.createDirectory(at:root,withIntermediateDirectories:true)
@@ -361,5 +362,65 @@ import WebKit
             window.orderOut(nil)
             print("内嵌终端通过：可编辑草稿、手动发送、首答回填、追问整合、运行中退出、二次 Esc 收起、出处保留、冲突保护")
         }
+    }
+    @MainActor private static func checkGraphRedraw(_ web: WKWebView, resources: URL) async throws {
+        web.loadFileURL(resources.appendingPathComponent("graph.html"), allowingReadAccessTo: resources)
+        for _ in 0..<80 {
+            if (try? await web.evaluateJavaScript("typeof projectGraph === 'object'") as? Bool) == true { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let result = try await web.evaluateJavaScript("""
+          (() => {
+            const canvas = document.querySelector('canvas');
+            const ctx = canvas.getContext('2d');
+            const red = {path:'a.md', title:'A', color:'#ff0000'};
+            const blue = {path:'b.md', title:'B', color:'#0000ff'};
+            const both = {nodes:[red, blue], edges:[[0,1]]};
+            const one = {nodes:[red], edges:[]}, empty = {nodes:[], edges:[]};
+            // Offscreen WebKit can throttle frames. Run only callbacks requested by the graph.
+            projectGraph.pause(true);
+            const original = window.requestAnimationFrame;
+            let pending;
+            window.requestAnimationFrame = callback => { pending = callback; return 1; };
+            function paint() {
+              while (pending) { const frame = pending; pending = null; frame(); }
+              const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+              const colors = new Set();
+              for (let i = 0; i < pixels.length; i += 4) {
+                if (!pixels[i+3]) continue;
+                if (pixels[i] === 255 && !pixels[i+1] && !pixels[i+2]) colors.add('red');
+                if (pixels[i+1] === 255 && !pixels[i] && !pixels[i+2]) colors.add('edge');
+                if (pixels[i+2] === 255 && !pixels[i] && !pixels[i+1]) colors.add('blue');
+                colors.add('ink');
+              }
+              return [...colors].sort().join(' ');
+            }
+            try {
+              canvas.style.outlineColor = '#00ff00';
+              projectGraph.pause(false);
+              projectGraph.update(both);
+              document.querySelector('[data-zoom="in"]').click();
+              if (paint() !== 'blue edge ink red') return '初始节点或连线未绘制';
+              const camera = JSON.stringify(projectGraph.state());
+              projectGraph.update(one);
+              if (paint() !== 'ink red') return '取消选择后仍显示旧节点或连线';
+              projectGraph.update(both);
+              if (paint() !== 'blue edge ink red') return '重新选择后节点或连线缺失';
+              if (JSON.stringify(projectGraph.state()) !== camera) return '筛选改变了手动视图';
+              document.querySelector('[data-zoom="fit"]').click();
+              paint();
+              projectGraph.update(empty);
+              if (paint() !== '') return '隐藏全部类别后仍有残留像素';
+              projectGraph.update(both);
+              projectGraph.update(one);
+              return paint() === 'ink red' ? 'PASS' : '快速切换未显示最终选择';
+            } finally {
+              projectGraph.pause(true);
+              window.requestAnimationFrame = original;
+            }
+          })()
+          """)
+        guard result as? String == "PASS" else { throw Failure(String(describing: result)) }
+        print("通过：关系图筛选在无鼠标事件时重绘节点与连线")
     }
 }

@@ -76,6 +76,15 @@ enum Dialog: Identifiable {
     }
     @Published var consoles: [ResearchSession] = []
     @Published var selectedConsole: UUID?
+    @Published private(set) var hiddenGraphFilters = PageCategory.defaultHiddenGraphFilters
+
+    func toggleGraphFilter(_ category: PageCategory) {
+        guard let project else { return }
+        let key = category.graphFilterKey
+        if !hiddenGraphFilters.insert(key).inserted { hiddenGraphFilters.remove(key) }
+        preferences.set(hiddenGraphFilters.sorted(), forKey: "hiddenGraphFilters." + project.id)
+    }
+
     @Published var showEntryRelations = true
     var activeConsole: ResearchSession? { consoles.first { $0.id == selectedConsole && $0.project.id == project?.id } }
     @Published var revision = 0
@@ -207,6 +216,7 @@ enum Dialog: Identifiable {
     func open(_ p: ProjectAt) {
         guard finishInlineNote() else { return }
         generation += 1; project = p; snapshot = Snapshot(); lastSignature = nil; resetSearch(for: p); focus = nil; headingFragment = nil; inspect = false
+        hiddenGraphFilters = preferences.stringArray(forKey: "hiddenGraphFilters." + p.id).map(Set.init) ?? PageCategory.defaultHiddenGraphFilters
         previousVisits = []; nextVisits = []
         refresh()
         let dest = Place(preferences.string(forKey: "last." + p.id))
@@ -406,8 +416,28 @@ enum Dialog: Identifiable {
         defer { refresh() }
         try Files.write(e, in: project.url)
     }
+    enum SourceRelation {
+        case quote(Anchor), document(String), asset(String)
+    }
+
+    func removeSourceRelation(_ relation: SourceRelation, from id: String) throws {
+        guard let project, let entry = snapshot.resolve(id) else { throw Failure("条目已移走。") }
+        guard inlineNote?.path != entry.path || finishInlineNote() else { throw Failure("请先处理正文的保存冲突。") }
+        guard var live = try Files.scan(project.url).resolve(id) else { throw Failure("条目已移走。") }
+        switch relation {
+        case .quote(let anchor): live.anchors.removeAll { $0 == anchor }
+        case .document(let path):
+            live.reportLinks.removeAll { $0 == path }
+            live.anchors.removeAll { $0.report == path }
+        case .asset(let path): live.assets.removeAll { $0 == path }
+        }
+        try store(live)
+    }
+
     func setRelation(from source: String, to target: String, present: Bool) throws {
         guard let project else { throw Failure("请先打开一个项目。") }
+        if let path = inlineNote?.path, [source, target].contains(where: { snapshot.resolve($0)?.path == path }),
+           !finishInlineNote() { throw Failure("请先处理正文的保存冲突。") }
         defer { refresh() }
         try Files.setRelation(from: source, to: target, present: present, in: project.url)
     }
@@ -541,10 +571,17 @@ enum Dialog: Identifiable {
     func openAsset(_ url: URL, fragment: String? = nil) throws {
         guard fm.fileExists(atPath: url.path) else { throw Failure("文件尚未在本机同步，或路径已变更。") }
         let ext = url.pathExtension.lowercased()
-        if let path = try? documentKey(for: url), Self.isMarkdown(url) || referenceDocument(path) != nil {
+        if let path = try? documentKey(for: url) {
             guard !snapshot.deletedPaths.contains(path) else { throw Failure("条目已删除。") }
-            go(.doc(path), fragment: fragment)
-            return
+            if Self.isMarkdown(url) || referenceDocument(path) != nil {
+                go(.doc(path), fragment: fragment)
+                return
+            }
+            let source = path.hasPrefix("library:") || path.hasPrefix("lakehouse:") ? path : "project:" + path
+            if MHTMLPreview.supports(url), snapshot.unlistedMaterials.contains(source) {
+                go(.entry(try registerMaterial(source).id), fragment: fragment)
+                return
+            }
         }
         guard !Self.isMarkdown(url) else { throw Failure("链接超出当前工作目录。") }
         if ["pdf","html","htm","txt","json","svg","png","jpg","jpeg","xlsx","csv","doc","docx","ppt","pptx","webp","gif","tiff","heic","rtf","xls"].contains(ext) {

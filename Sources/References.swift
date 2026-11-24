@@ -22,12 +22,15 @@ private struct ReportLinksMenu: View {
     var body: some View {
         Menu("关联基础报告") {
             ForEach(m.snapshot.reports, id: \.self) { path in
-                Toggle(documentLabel(path), isOn: Binding(get: { entry.reportLinks.contains(path) }, set: { on in
+                Toggle(documentLabel(path), isOn: Binding(get: { entry.reportLinks.contains(path) || entry.anchors.contains(where: { $0.report == path }) }, set: { on in
                     m.attempt {
-                        guard var live = m.snapshot.resolve(entry.id) else { throw Failure("资料已删除。") }
-                        live.reportLinks.removeAll { $0 == path }
-                        if on { live.reportLinks.append(path) }
-                        try m.store(live)
+                        if on {
+                            guard var live = m.snapshot.resolve(entry.id) else { throw Failure("资料已删除。") }
+                            if !live.reportLinks.contains(path) { live.reportLinks.append(path) }
+                            try m.store(live)
+                        } else {
+                            try m.removeSourceRelation(.document(path), from: entry.id)
+                        }
                     }
                 }))
             }
@@ -174,6 +177,8 @@ struct ReferenceFilePage: View {
                     if let raw = try? m.text(path) {
                         Reader(model: m, path: path, bodyText: Document(raw).body, allowsEditing: false)
                     } else { Text("无法读取这份 Markdown 文件。").padding() }
+                } else if MHTMLPreview.supports(file) {
+                    MHTMLPreview(url: file).id(file)
                 } else if file.pathExtension.lowercased() == "pdf" {
                     SearchPDFPreview(url:file, occurrence:landing, navigation:m.searchNavigation)
                 } else if ["htm","html","svg","json","txt","csv"].contains(file.pathExtension.lowercased()), let landing,

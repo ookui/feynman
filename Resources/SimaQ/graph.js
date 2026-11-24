@@ -271,7 +271,9 @@
         selected=graph.nodes.find(n=>n.path===path)||null;
         counts.textContent=graph.nodes.length+' '+tr('节点')+' · '+graph.edges.length+' '+tr('关系');
         message.hidden=!!graph.nodes.length; message.textContent=tr('没有可显示的节点');
-        resize(); if(fitting) fit();
+        resize();
+        if (fitting) fit();
+        drawSoon();
       },
       state() { return {cx,cy,scale,fitScale,fitting,selected:selected?.path||null}; },
       restore(state) {

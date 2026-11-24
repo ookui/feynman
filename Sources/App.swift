@@ -388,7 +388,7 @@ struct Sidebar: View {
                                         Button { if !collapsedResults.insert(hit.id).inserted { collapsedResults.remove(hit.id) } } label: {
                                             Image(systemName: collapsedResults.contains(hit.id) ? "chevron.right" : "chevron.down").font(.caption2)
                                         }.buttonStyle(.plain)
-                                        searchRow(hit.item, snippet:nil, pinned:pinned.contains(hit.id), hit:hit)
+                                        searchRow(hit.item, snippet: hit.aliasRanges.isEmpty ? nil : hit.snippet, pinned:pinned.contains(hit.id), hit:hit)
                                         Text(String(hit.occurrences.count + (hit.titleMatch ? 1 : 0))).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                                     }
                                     if !collapsedResults.contains(hit.id) {
@@ -396,7 +396,7 @@ struct Sidebar: View {
                                             Button { m.openSearchOccurrence(hit,o) } label: {
                                                 VStack(alignment:.leading,spacing:2) {
                                                     if let page = o.page { Text("第 \(page) 页").foregroundStyle(.secondary) }
-                                                    (Text(o.before) + Text(o.match).bold().foregroundColor(ink) + Text(o.after)).lineLimit(2)
+                                                    highlighted(o.before + o.match + o.after, ranges: [NSRange(location: o.before.utf16.count, length: o.match.utf16.count)]).lineLimit(2)
                                                 }.font(.caption).foregroundStyle(.secondary)
                                             }.buttonStyle(SidebarLinkStyle(selected:m.searchLanding == o)).padding(.leading,14)
                                         }
@@ -470,6 +470,16 @@ struct Sidebar: View {
         row("过程日志",.log,.doc("log.md")); row("我的 Memo",.memo,.doc("memo.md"))
     }
 
+    private func highlighted(_ text: String, ranges: [NSRange]) -> Text {
+        var value = AttributedString(text)
+        for range in ranges {
+            guard let indices = Range(range, in: text), let span = Range(indices, in: value) else { continue }
+            value[span].backgroundColor = Color(red: 1, green: 0.84, blue: 0.39)
+            value[span].foregroundColor = Color(white: 0.12)
+        }
+        return Text(value)
+    }
+
     private func searchRow(_ item: ProjectSearchItem, snippet: String?, pinned: Bool, hit: ProjectSearchHit? = nil) -> some View {
         let core: Bool = { if case .entry(let id) = item.target { return m.snapshot.resolve(id)?.core == true }; return false }()
         let selected: Bool = {
@@ -483,8 +493,8 @@ struct Sidebar: View {
             Button { if let hit { m.openSearchOccurrence(hit,nil) } else { m.openSearchItem(item) } } label: {
                 HStack(alignment: .top, spacing: 6) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text((core ? "★ " : "") + item.title).fontWeight(core ? .bold : .regular).lineLimit(2)
-                        if let snippet { Text(snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+                        (Text(core ? "★ " : "") + highlighted(item.title, ranges: hit?.titleRanges ?? [])).fontWeight(core ? .bold : .regular).lineLimit(2)
+                        if let snippet { highlighted(snippet, ranges: hit?.aliasRanges ?? []).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
                     }
                     Spacer(minLength: 0)
                 }.contentShape(Rectangle())

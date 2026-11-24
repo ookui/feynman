@@ -31,12 +31,14 @@ struct ProjectDetail: View {
             PageHeading(title: "Project Overview", category: .project) { EmptyView() }
             ScrollView(.horizontal) {
                 HStack(spacing: 6) {
-                    overviewButton("Preliminary", .report, .preliminary)
+                    overviewButton("Preliminary", .report)
                     ForEach(Kind.allCases) { kind in
-                        overviewButton(kind.englishLabel, .kind(kind), .group(kind))
+                        overviewButton(kind.englishLabel, .kind(kind))
                     }
-                    overviewButton("Log", .log, .doc("log.md"))
-                    overviewButton("Memo", .memo, .doc("memo.md"))
+                    overviewButton("Images", .images)
+                    overviewButton("Log", .log)
+                    overviewButton("Memo", .memo)
+                    if !m.snapshot.documents.isEmpty { overviewButton("Documents", .documents) }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -48,12 +50,16 @@ struct ProjectDetail: View {
         }
     }
 
-    private func overviewButton(_ title: String, _ category: PageCategory, _ destination: Place) -> some View {
-        Button { m.go(destination) } label: {
+    private func overviewButton(_ title: String, _ category: PageCategory) -> some View {
+        let visible = !m.hiddenGraphFilters.contains(category.graphFilterKey)
+        return Button { m.toggleGraphFilter(category) } label: {
             Text(title).font(.system(size: 12, weight: .medium)).fixedSize()
         }
         .buttonStyle(.bordered)
-        .tint(category.color)
+        .tint(visible ? category.color : .gray)
+        .foregroundStyle(visible ? category.color : .secondary)
+        .accessibilityAddTraits(visible ? .isSelected : [])
+        .help((visible ? "隐藏" : "显示") + title + " 节点和连线")
     }
 
     private var preliminary: some View {
@@ -173,6 +179,17 @@ struct ProjectDetail: View {
 }
 struct Inspector: View {
     @ObservedObject var m: Workspace
+    @ViewBuilder private func passageMenu(_ entry: Entry) -> some View {
+        let anchors = entry.anchors.filter { m.passage.contains($0) }
+        if anchors.count == 1, let anchor = anchors.first {
+            RelationMenu(model: m, entry: entry, target: .quote(anchor))
+        } else {
+            ForEach(anchors, id: \.self) { anchor in
+                Menu(anchor.quote) { RelationMenu(model: m, entry: entry, target: .quote(anchor)) }
+            }
+        }
+    }
+
     var body: some View {
         ScrollView { VStack(alignment:.leading,spacing:14) {
             HStack { Text(m.passage.isEmpty ? "关联与出处" : "所选原文").font(.headline); Spacer(); Button { m.inspect=false } label:{ Image(systemName:"xmark") }.buttonStyle(.plain) }
@@ -188,6 +205,7 @@ struct Inspector: View {
                 ForEach(questions) { question in
                     VStack(alignment: .leading, spacing: 5) {
                         Button(question.title) { m.go(.entry(question.id)) }.buttonStyle(SidebarLinkStyle())
+                            .contextMenu { passageMenu(question) }
                         QuestionStatusButton(m: m, question: question)
                     }
                 }
@@ -197,6 +215,7 @@ struct Inspector: View {
                     Text("原文关联条目").font(.headline)
                     ForEach(others) { entry in
                         Button { m.go(.entry(entry.id)) } label: { Label(entry.title,systemImage:entry.kind.symbol) }.buttonStyle(SidebarLinkStyle())
+                            .contextMenu { passageMenu(entry) }
                     }
                 }
                 Divider()
@@ -206,12 +225,22 @@ struct Inspector: View {
                 if entries.isEmpty { Text("此文档尚无关联条目。").foregroundStyle(.secondary) }
                 ForEach(entries) { e in
                     Button { m.go(.entry(e.id)) } label:{ Label(e.title,systemImage:e.kind.symbol).frame(maxWidth:.infinity,alignment:.leading) }.buttonStyle(SidebarLinkStyle())
-                    ForEach(e.anchors.filter { $0.report == path },id:\.self) { a in Button(a.quote) { m.go(.doc(path),anchor:a) }.lineLimit(2).buttonStyle(SidebarLinkStyle()).foregroundStyle(.secondary) }
+                        .contextMenu { RelationMenu(model: m, entry: e, target: .document(path)) }
+                    ForEach(e.anchors.filter { $0.report == path },id:\.self) { a in
+                        Button(a.quote) { m.go(.doc(path),anchor:a) }.lineLimit(2).buttonStyle(SidebarLinkStyle()).foregroundStyle(.secondary)
+                            .contextMenu { RelationMenu(model: m, entry: e, target: .quote(a)) }
+                    }
                 }
             } else if case .entry(let id)=m.place, let e=m.snapshot.resolve(id) {
                 Button("关联条目…") { m.dialog = .relate(e) }
-                ForEach(m.snapshot.related(to: e)) { a in Button(a.title) { m.go(.entry(a.id)) }.buttonStyle(SidebarLinkStyle()) }
-                ForEach(e.anchors,id:\.self) { a in Button(a.quote) { if m.valid(.doc(a.report)) { m.go(.doc(a.report),anchor:a) } }.buttonStyle(SidebarLinkStyle()) }
+                ForEach(m.snapshot.related(to: e)) { a in
+                    Button(a.title) { m.go(.entry(a.id)) }.buttonStyle(SidebarLinkStyle())
+                        .contextMenu { RelationMenu(model: m, entry: e, target: .entry(a.id)) }
+                }
+                ForEach(e.anchors,id:\.self) { a in
+                    Button(a.quote) { if m.valid(.doc(a.report)) { m.go(.doc(a.report),anchor:a) } }.buttonStyle(SidebarLinkStyle())
+                        .contextMenu { RelationMenu(model: m, entry: e, target: .quote(a)) }
+                }
             } else { Text("打开报告或条目以查看关联。").foregroundStyle(.secondary) }
         }.font(.system(size:12)).padding(15).frame(maxWidth:.infinity,alignment:.leading) }
     }

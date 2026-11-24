@@ -5,8 +5,36 @@ private enum RelationLabel {
     static let quote = "Quotes"
 }
 
-private enum RelationTarget: Hashable {
+enum RelationTarget: Hashable {
     case entry(String), quote(Anchor), asset(String), document(String)
+}
+
+struct RelationMenu: View {
+    @ObservedObject var model: Workspace
+    let entry: Entry
+    let target: RelationTarget
+
+    @ViewBuilder var body: some View {
+        switch target {
+        case .entry(let id):
+            if let other = model.snapshot.resolve(id),
+               !Set(entry.links).isDisjoint(with: [other.id] + other.aliases) ||
+               !Set(other.links).isDisjoint(with: [entry.id] + entry.aliases) {
+                Button("解除手动关联") { model.attempt { try model.setRelation(from: entry.id, to: id, present: false) } }
+            }
+        case .quote(let anchor):
+            if entry.anchors.contains(anchor) {
+                Button("解除这处引文关联") { model.attempt { try model.removeSourceRelation(.quote(anchor), from: entry.id) } }
+            }
+        case .document(let path):
+            if entry.reportLinks.contains(path) || entry.anchors.contains(where: { $0.report == path }) {
+                Button("解除与此文档的关联") { model.attempt { try model.removeSourceRelation(.document(path), from: entry.id) } }
+            }
+        case .asset(let path):
+            Button("解除资料关联") { model.attempt { try model.removeSourceRelation(.asset(path), from: entry.id) } }
+            if path.hasPrefix("library:") { Button("查看反链") { model.dialog = .backlinks(path) } }
+        }
+    }
 }
 
 private struct RelationNode: Identifiable {
@@ -58,14 +86,13 @@ struct EntryRelations: View {
             }
         }
         result += related.filter { $0.kind != .questions }.map(node)
-        if entry.kind == .references {
-            for path in Set(entry.reportLinks).union(citing).sorted() where model.snapshot.entry(at: path) == nil && model.valid(.doc(path)) {
-                let category = PageCategory(document: path)
-                result.append(RelationNode(target: .document(path), title: documentLabel(path), typeLabel: category.label,
-                                           detail: category.label, icon: path == "memo.md" ? .memo : .report))
-            }
-            return result
+        let documents = Set(entry.reportLinks).union(entry.kind == .references ? citing : [])
+        for path in documents.sorted() where model.snapshot.entry(at: path) == nil && model.valid(.doc(path)) {
+            let category = PageCategory(document: path)
+            result.append(RelationNode(target: .document(path), title: documentLabel(path), typeLabel: category.label,
+                                       detail: category.label, icon: path == "memo.md" ? .memo : .report))
         }
+        if entry.kind == .references { return result }
         for asset in Set(entry.assets).sorted() {
             if let ref = model.snapshot.reference(for: asset, from: entry.path), related.contains(where: { $0.id == ref.id }) { continue }
             let icon = RelationIcon(material: asset)
@@ -171,11 +198,7 @@ struct EntryRelations: View {
         .background(Color.white.opacity(0.87), in: RoundedRectangle(cornerRadius: 7))
         .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(Color.gray.opacity(0.24)).allowsHitTesting(false) }
         .help(node.title + "\n" + node.detail)
-        .contextMenu {
-            if case .asset(let path) = node.target, path.hasPrefix("library:") {
-                Button("查看反链") { model.dialog = .backlinks(path) }
-            }
-        }
+        .contextMenu { RelationMenu(model: model, entry: entry, target: node.target) }
     }
 
     private func network(_ items: [RelationNode]) -> some View {
@@ -289,11 +312,7 @@ struct EntryRelations: View {
             }
         }.help(node.title + "\n" + node.detail)
         .accessibilityLabel(node.title + "，" + node.detail)
-        .contextMenu {
-            if case .asset(let path) = node.target, path.hasPrefix("library:") {
-                Button("查看反链") { model.dialog = .backlinks(path) }
-            }
-        }
+        .contextMenu { RelationMenu(model: model, entry: entry, target: node.target) }
     }
 }
 

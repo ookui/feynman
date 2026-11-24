@@ -83,6 +83,73 @@ import WebKit
         try await run("article.querySelector('mark[role=button]').click()")
         for _ in 0..<100 where model.place != .entry(entity.id) { try await Task.sleep(for:.milliseconds(30)) }
         guard model.place == .entry(entity.id) else { throw Failure("引文跳转失败") }
+        // Exercise the shipping rich editor with AppKit mouse drags and the Delete key.
+        let first = "前段保留。这几十个中文字用于验证编辑状态下的鼠标拖选，可以一次删除选中的全部文字。"
+        let middle = "第二段在这里继续。"
+        let last = "末段保留原文。"
+        let original = [first, middle, last].joined(separator: "\n\n")
+        let selectionNote = Entry(kind: .concepts, title: "编辑选区", body: original)
+        try model.store(selectionNote)
+        model.go(.entry(selectionNote.id))
+        try await wait("typeof article !== 'undefined' && article.querySelectorAll('p').length===3")
+        try await run("article.querySelector('p').click()")
+        try await wait("typeof editor !== 'undefined' && document.activeElement.tagName==='TEXTAREA'")
+        guard let web = model.readerWeb else { throw Failure("缺少选区测试视图") }
+        func drag(_ start: (Int,Int), _ end: (Int,Int)) async throws {
+            let points = try await web.evaluateJavaScript("""
+                (() => {
+                  const nodes = [...document.querySelectorAll('.sima-block')].filter(b=>b.dataset.kind!=='blank');
+                  function point(n, offset) {
+                    const el = nodes[n].querySelector('.sima-text-mirror,p');
+                    const r = document.createRange();
+                    r.setStart(el.firstChild,offset);r.collapse(true);
+                    const box = r.getBoundingClientRect();
+                    return [box.x,box.y+box.height/2];
+                  }
+                  return [...point(\(start.0),\(start.1)), ...point(\(end.0),\(end.1))];
+                })()
+                """) as! [Double]
+            let types: [NSEvent.EventType] = [.leftMouseDown,.leftMouseDragged,.leftMouseDragged,.leftMouseUp]
+            for (i,type) in types.enumerated() {
+                let t = [0.0,0.5,1.0,1.0][i]
+                let x = points[0]+(points[2]-points[0])*t, y = points[1]+(points[3]-points[1])*t
+                let at = web.convert(NSPoint(x:x,y:web.isFlipped ? y : web.bounds.height-y),to:nil)
+                let event = NSEvent.mouseEvent(with:type,location:at,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+                                               windowNumber:window.windowNumber,context:nil,eventNumber:i+1,clickCount:1,pressure:1)!
+                switch type {
+                case .leftMouseDown: web.mouseDown(with:event)
+                case .leftMouseDragged: web.mouseDragged(with:event)
+                default: web.mouseUp(with:event)
+                }
+                try await Task.sleep(for:.milliseconds(75))
+            }
+        }
+        func deleteAndCheck(_ start: Int, _ end: Int) async throws {
+            try await wait("Math.min(editor.getState().selection.anchor,editor.getState().selection.head)===\(start) && Math.max(editor.getState().selection.anchor,editor.getState().selection.head)===\(end)")
+            let key = NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+                windowNumber:window.windowNumber,context:nil,characters:"\u{7f}",charactersIgnoringModifiers:"\u{7f}",isARepeat:false,keyCode:51)!
+            web.keyDown(with:key)
+            let expected = (original as NSString).replacingCharacters(in:NSRange(location:start,length:end-start),with:"")
+            try await wait("editor.getText()===\(try json(expected))")
+            try await run("editor.action('edit.undo')")
+            try await wait("editor.getText()===\(try json(original))")
+        }
+        try await drag((0,5),(0,36))
+        try await deleteAndCheck(5,36)
+        try await run("editor.locate(3)")
+        try await drag((0,3),(2,2))
+        let lastOffset = original.utf16.count-last.utf16.count+2
+        try await deleteAndCheck(3,lastOffset)
+        try await run("editor.locate(2)")
+        try await drag((2,2),(0,3))
+        try await deleteAndCheck(3,lastOffset)
+        try await run("editor.locate(1)")
+        try await drag((1,1),(2,2))
+        try await deleteAndCheck(first.utf16.count+3,lastOffset)
+        guard model.finishInlineNote(), try Files.scan(project.url).resolve(selectionNote.id)?.body == original else {
+            throw Failure("拖选删除并撤销后正文回读失败")
+        }
+        print("PASS 原生 WebKit 段内、跨段、反向拖选删除与撤销")
         print("PASS WebKit 正文、Tab/Shift-Tab、段落拆分与软换行、格式、表格、撤销、SVG 拖入、文件回读与原文引文导航")
     }
 }

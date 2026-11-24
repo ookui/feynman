@@ -1,7 +1,20 @@
 import SwiftUI
 
 enum PageCategory {
-    case project, report, kind(Kind), webLinks, log, memo
+    case project, report, kind(Kind), webLinks, log, memo, images, documents
+
+    var graphFilterKey: String {
+        switch self {
+        case .kind(let kind): return kind.rawValue
+        case .webLinks: return Kind.references.rawValue
+        default: return label
+        }
+    }
+
+    static let defaultHiddenGraphFilters: Set<String> = [
+        PageCategory.images.graphFilterKey, PageCategory.report.graphFilterKey,
+        Kind.events.rawValue, Kind.references.rawValue
+    ]
 
     init(document path: String) {
         switch path {
@@ -13,6 +26,8 @@ enum PageCategory {
 
     var label: String {
         switch self {
+        case .images: return "Images"
+        case .documents: return "Documents"
         case .project: return "Project"
         case .report: return "Reports"
         case .kind(let kind): return kind.englishLabel
@@ -30,7 +45,7 @@ enum PageCategory {
         case .kind(.concepts): return 0xA53EC6
         case .kind(.entities): return 0x2464F5
         case .kind(.events): return 0x8054DC
-        case .kind(.references): return 0x2679CB
+        case .kind(.references), .images, .documents: return 0x2679CB
         case .webLinks: return 0x00858C
         case .log: return 0x16855D
         case .memo: return 0xBC4679

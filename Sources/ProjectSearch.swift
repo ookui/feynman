@@ -34,14 +34,15 @@ private struct SearchTerms {
     struct Match {
         let tier: Int
         let gap: Int
-        let location: Int
+        let ranges: [NSRange]
+        var location: Int { ranges[0].location }
     }
 
     func match(in text: NSString) -> Match? {
         guard !compact.isEmpty, text.length > 0 else { return nil }
         let direct = text.range(of: compact, options: .literal)
         if direct.location != NSNotFound {
-            return Match(tier: direct.length == text.length ? 0 : 1, gap: 0, location: direct.location)
+            return Match(tier: direct.length == text.length ? 0 : 1, gap: 0, ranges: [direct])
         }
         if words.count > 1, let match = ordered(words, in: text, tier: 2) { return match }
         // A single unspaced Chinese phrase may omit intervening words.
@@ -64,7 +65,27 @@ private struct SearchTerms {
         }
         let first = used.map(\.location).min() ?? 0
         let span = (used.map(NSMaxRange).max() ?? first) - first
-        return Match(tier: 4, gap: span - compact.utf16.count, location: first)
+        return Match(tier: 4, gap: span - compact.utf16.count, ranges: used.sorted { $0.location < $1.location })
+    }
+
+    // Translate the compact index back to the original spelling and UTF-16 offsets.
+    static func originalRanges(_ ranges: [NSRange], in text: Substring, compactStart: Int = 0, rawStart: Int = 0) -> [NSRange] {
+        var compact = compactStart, offset = rawStart, index = 0
+        var result: [NSRange] = []
+        for character in text {
+            while index < ranges.count && NSMaxRange(ranges[index]) <= compact { index += 1 }
+            if index == ranges.count { break }
+            let value = String(character)
+            let next = compact + SearchTerms(value).compact.utf16.count
+            if next > compact && ranges[index].location < next {
+                if let last = result.last, NSMaxRange(last) == offset {
+                    result[result.count - 1].length += value.utf16.count
+                } else { result.append(NSRange(location: offset, length: value.utf16.count)) }
+            }
+            compact = next
+            offset += value.utf16.count
+        }
+        return result
     }
 
     /// Consume keywords covered by the title so the remaining ones can match in the body.
@@ -95,15 +116,17 @@ private struct SearchTerms {
                 end = NSMaxRange(r)
             }
             // Tighten this window backwards so an early stray word does not hide a closer match.
+            var ranges: [NSRange] = []
             var previous = end
             for part in parts.reversed() {
                 let r = text.range(of: part, options: [.literal, .backwards],
                                    range: NSRange(location: first, length: previous - first))
+                ranges.append(r)
                 previous = r.location
             }
             let gap = end - previous - compact.utf16.count
             if gap <= (maxGap ?? Int.max), gap < (best?.gap ?? Int.max) {
-                best = Match(tier: tier, gap: gap, location: previous)
+                best = Match(tier: tier, gap: gap, ranges: ranges.reversed())
                 if gap == 0 { break }
             }
             start = previous + parts[0].utf16.count
@@ -140,6 +163,8 @@ struct ProjectSearchHit: Identifiable {
     let snippet: String?
     var occurrences: [SearchOccurrence] = []
     var titleMatch = false
+    var titleRanges: [NSRange] = []
+    var aliasRanges: [NSRange] = []
     var id: String { item.id }
 }
 
@@ -196,19 +221,16 @@ private struct IndexedBody {
             match: ns.substring(with: range),
             after: ns.substring(with: NSRange(location: end, length: min(35, ns.length-end))))
     }
-    func fuzzyOccurrence(at location: Int, needle: SearchTerms) -> SearchOccurrence? {
-        guard let passage = passages.last(where: { $0.start <= location }) else { return nil }
-        var compactOffset = passage.start
-        let rawStart = passage.original.startIndex.utf16Offset(in: raw)
-        var at = rawStart
-        for ch in passage.original {
-            let value = String(ch)
-            if compactOffset + SearchTerms(value).compact.utf16.count > location { break }
-            compactOffset += SearchTerms(value).compact.utf16.count
-            at += value.utf16.count
+    func fuzzyOccurrences(_ match: SearchTerms.Match) -> [SearchOccurrence] {
+        let end = NSMaxRange(match.ranges.last!)
+        var ranges: [NSRange] = []
+        for (index, passage) in passages.enumerated() {
+            if passage.start >= end { break }
+            if index + 1 < passages.count && passages[index + 1].start <= match.location { continue }
+            ranges += SearchTerms.originalRanges(match.ranges, in: passage.original, compactStart: passage.start,
+                                                 rawStart: passage.original.startIndex.utf16Offset(in: raw))
         }
-        let ns = raw as NSString
-        return occurrence(NSRange(location: at, length: min(ns.length-at, max(1,needle.words.first?.utf16.count ?? 1))))
+        return ranges.map(occurrence)
     }
 
     func snippet(at location: Int) -> String? {
@@ -226,6 +248,7 @@ private struct IndexedBody {
 struct ProjectSearchIndex {
     private struct Record {
         let item: ProjectSearchItem
+        let titleStrings: [String]
         let titles: [SearchTerms]
         let bodies: [IndexedBody]
     }
@@ -265,7 +288,8 @@ struct ProjectSearchIndex {
             return bodies
         }
         func add(_ item: ProjectSearchItem, otherTitles: [String] = [], bodies: [IndexedBody], aliases: [String] = []) {
-            records.append(Record(item: item, titles: ([item.title] + otherTitles).map(SearchTerms.init), bodies: bodies))
+            let titles = [item.title] + otherTitles
+            records.append(Record(item: item, titleStrings: titles, titles: titles.map(SearchTerms.init), bodies: bodies))
             itemsByKey[item.id] = item
             for alias in aliases where itemsByKey[alias] == nil { itemsByKey[alias] = item }
         }
@@ -340,30 +364,47 @@ struct ProjectSearchIndex {
             let bodies = record.bodies.filter { document == nil || $0.path == document }
             if document != nil && bodies.isEmpty { continue }
             let occurrences = bodies.flatMap { $0.occurrences(regex) }
-            let exactTitle = regex.firstMatch(in: record.item.title,range:NSRange(record.item.title.startIndex...,in:record.item.title)) != nil
+            let titleRanges = regex.matches(in: record.item.title, range: NSRange(record.item.title.startIndex..., in: record.item.title))
+                .map(\.range).filter { $0.length > 0 }
+            let exactTitle = !titleRanges.isEmpty
             if options.strict || latinPhrase {
                 if exactTitle || !occurrences.isEmpty {
-                    ranked.append((exactTitle ? 0 : 6,0,index,ProjectSearchHit(item:record.item,snippet:occurrences.first?.match,occurrences:occurrences,titleMatch:exactTitle)))
+                    ranked.append((exactTitle ? 0 : 6,0,index,ProjectSearchHit(item:record.item,snippet:occurrences.first?.match,occurrences:occurrences,titleMatch:exactTitle,titleRanges:titleRanges)))
                 }
                 continue
             }
-            let titles = record.titles.compactMap { title -> SearchTerms.Match? in
+            let titles = record.titles.enumerated().compactMap { i, title -> (Int, SearchTerms.Match)? in
                 guard let hit = needle.match(in: title.compact as NSString) else { return nil }
-                // For "AI", put a whole word ahead of the letters inside "retail".
                 let wholeWord = needle.words.count == 1 && title.words.contains(needle.compact)
                 let tier = hit.tier == 0 || wholeWord ? hit.tier : hit.tier + 1
-                return SearchTerms.Match(tier: tier, gap: hit.gap, location: hit.location)
+                return (i, SearchTerms.Match(tier: tier, gap: hit.gap, ranges: hit.ranges))
             }
-            if let best = titles.min(by: { ($0.tier, $0.gap) < ($1.tier, $1.gap) }) {
-                ranked.append((best.tier, best.gap, index, ProjectSearchHit(item: record.item, snippet: nil, occurrences: occurrences, titleMatch: true)))
+            if let (i, best) = titles.min(by: { ($0.1.tier, $0.1.gap) < ($1.1.tier, $1.1.gap) }) {
+                let title = record.titleStrings[i]
+                var displayed = titleRanges
+                if displayed.isEmpty, let primary = titles.first(where: { $0.0 == 0 }) {
+                    displayed = SearchTerms.originalRanges(primary.1.ranges, in: record.item.title[...])
+                }
+                let alias = displayed.isEmpty && i > 0
+                ranked.append((best.tier, best.gap, index, ProjectSearchHit(item: record.item, snippet: alias ? title : nil,
+                    occurrences: occurrences, titleMatch: true, titleRanges: displayed,
+                    aliasRanges: alias ? SearchTerms.originalRanges(best.ranges, in: title[...]) : [])))
                 continue
             }
             var matches = bodies.compactMap { body in needle.match(in: body.compact).map { ($0, body) } }
-            if matches.isEmpty, let title = record.titles.first, let remaining = needle.remainingTerms(after: title.compact as NSString) {
-                matches = bodies.compactMap { body in remaining.match(in: body.compact).map { ($0, body) } }
+            var partialTitleRanges: [NSRange] = []
+            if let title = record.titles.first, let remaining = needle.remainingTerms(after: title.compact as NSString) {
+                let terms = needle.words.compactMap { word -> NSRange? in
+                    let range = (title.compact as NSString).range(of: word, options: .literal)
+                    return range.location == NSNotFound ? nil : range
+                }.sorted { $0.location < $1.location }
+                partialTitleRanges = SearchTerms.originalRanges(terms, in: record.item.title[...])
+                if matches.isEmpty {
+                    matches = bodies.compactMap { body in remaining.match(in: body.compact).map { ($0, body) } }
+                }
             }
             if let (best, body) = matches.min(by: { ($0.0.tier, $0.0.gap) < ($1.0.tier, $1.0.gap) }) {
-                ranked.append((6 + best.tier, best.gap, index, ProjectSearchHit(item: record.item, snippet: body.snippet(at: best.location), occurrences: occurrences.isEmpty ? [body.fuzzyOccurrence(at: best.location, needle: needle)].compactMap { $0 } : occurrences)))
+                ranked.append((6 + best.tier, best.gap, index, ProjectSearchHit(item: record.item, snippet: body.snippet(at: best.location), occurrences: occurrences.isEmpty ? body.fuzzyOccurrences(best) : occurrences, titleRanges: partialTitleRanges)))
             } else if !occurrences.isEmpty {
                 ranked.append((6,0,index,ProjectSearchHit(item: record.item,snippet:occurrences[0].match,occurrences:occurrences)))
             }

@@ -186,6 +186,7 @@ struct Snapshot {
     var citations: [String: Set<String>] = [:]
     var unlistedMaterials: [String] = []
     var looseAssets: [String] = []
+    var inlineImages: [String: [String]] = [:]
     private mutating func indexEntries() {
         let displaced = Set(all.flatMap(\.aliases))
         entries = all.filter { !$0.deleted && !displaced.contains($0.id) }
@@ -579,9 +580,10 @@ enum MaterialLinks {
         return nil
     }
 
-    static func links(in body: String, from path: String) -> [String] {
-        guard body.contains("[") || body.contains("<") || body.contains("://") else { return [] }
+    static func destinations(in body: String, from path: String) -> (links: [String], images: [String]) {
+        guard body.contains("[") || body.contains("<") || body.contains("://") else { return ([], []) }
         let markdown = try? AttributedString(markdown: body, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        let images = (markdown?.runs.compactMap { $0.imageURL?.relativeString } ?? []).compactMap { key($0, from: path) }
         var found = (markdown?.runs.compactMap { $0.link?.relativeString } ?? []).compactMap { key($0, from: path) }
         // Pasted URLs without Markdown link syntax are also usable material.
         if let detector = detector {
@@ -593,7 +595,7 @@ enum MaterialLinks {
             }
         }
         var seen = Set<String>()
-        return found.filter { seen.insert($0).inserted }
+        return (found.filter { seen.insert($0).inserted }, images)
     }
     private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 }
@@ -604,7 +606,12 @@ extension Snapshot {
         let removedFiles = Set(deletedPaths.map { "project:" + $0 })
         let refs = active.filter { $0.kind == .references }
         var linksByPath: [String: [String]] = [:]
-        for e in active { linksByPath[e.path] = MaterialLinks.links(in: e.body, from: e.path) + e.assets }
+        func index(_ body: String, path: String, assets: [String] = []) {
+            let destinations = MaterialLinks.destinations(in: body, from: path)
+            linksByPath[path] = destinations.links + assets
+            if !destinations.images.isEmpty { inlineImages[path] = destinations.images }
+        }
+        for e in active { index(e.body, path: e.path, assets: e.assets) }
         for r in refs {
             var seen = Set<String>()
             let candidates = r.standaloneMarkdown ? r.assets + ["project:" + r.path] : r.assets + (linksByPath[r.path] ?? [])
@@ -617,7 +624,7 @@ extension Snapshot {
             }
         }
         for path in reports + documents + ["memo.md", "log.md"] {
-            do { if let raw = try Files.contents(Files.child(root, path)) { linksByPath[path] = MaterialLinks.links(in: Document(raw).body, from: path) } }
+            do { if let raw = try Files.contents(Files.child(root, path)) { index(Document(raw).body, path: path) } }
             catch { issues.append(path + "：" + error.localizedDescription) }
         }
         for (path, keys) in linksByPath {

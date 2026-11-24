@@ -882,10 +882,6 @@
       caret.setStart(p.offsetNode,p.offset);caret.collapse(true);
       return caret;
     }
-    function hitPoint(x,y) {
-      const r=rangeAtPoint(x,y);
-      return r?sourcePoint(r.startContainer,r.startOffset):null;
-    }
     function editAtClick(b,caret,anchor,head) {
       const line=caret?.getBoundingClientRect();
       const blockTop=b.node.getBoundingClientRect().top;
@@ -1378,31 +1374,36 @@
       }
       if (failure) (options.onError || window.alert)(String(failure.message || failure));
     }
-    function imageDropPoint(e) {
-      if (field && e.target === field) {
-        // WebKit exposes the textarea's host at the pointer. Its mirror has the
-        // same line breaks and glyph positions, including highlighted spans.
+    // A textarea exposes no text nodes to hit testing. Its typesetting mirror has
+    // the same line breaks and lets both drops and text drags resolve a source offset.
+    function textEndpoint(x, y) {
+      const target = document.elementFromPoint(x, y);
+      if (field && target === field) {
         field.style.pointerEvents = 'none';
         mirror.style.pointerEvents = 'auto';
         mirror.style.webkitUserSelect = 'text';
         try {
-          const caret = rangeAtPoint(e.clientX,e.clientY);
-          if (caret && mirror.contains(caret.startContainer)) {
-            const prefix = document.createRange();
-            prefix.selectNodeContents(mirror);
-            prefix.setEnd(caret.startContainer,caret.startOffset);
-            const raw = text.slice(active.start,active.end);
-            return Math.min(active.end,active.start + rawOffset(raw,prefix.toString().length));
-          }
-          return active.end;
+          const caret = rangeAtPoint(x, y);
+          if (!caret || !mirror.contains(caret.startContainer)) return null;
+          const prefix = document.createRange();
+          prefix.selectNodeContents(mirror);
+          prefix.setEnd(caret.startContainer,caret.startOffset);
+          const raw = text.slice(active.start,active.end);
+          return {caret, offset:Math.min(active.end,active.start + rawOffset(raw,prefix.toString().length))};
         } finally {
           field.style.removeProperty('pointer-events');
           mirror.style.removeProperty('pointer-events');
           mirror.style.removeProperty('-webkit-user-select');
         }
       }
+      const caret = rangeAtPoint(x,y);
+      if (!caret) return null;
+      const offset = target?.closest('.sima-end-entry') ? text.length : sourcePoint(caret.startContainer,caret.startOffset);
+      return offset == null ? null : {caret, offset};
+    }
+    function imageDropPoint(e) {
       if (e.target.closest('.sima-end-entry')) return text.length;
-      return hitPoint(e.clientX,e.clientY) ?? (e.clientY < doc.getBoundingClientRect().top ? 0 : text.length);
+      return textEndpoint(e.clientX,e.clientY)?.offset ?? (e.clientY < doc.getBoundingClientRect().top ? 0 : text.length);
     }
     on(viewport,'dragover',e=>{
       if (!options.onAsset || !e.dataTransfer?.types.includes('Files') || e.target.closest('.sima-references,dialog')) return;
@@ -1426,16 +1427,55 @@
       readSelection();
       void insertImages(files,...range(),false);
     },{capture:true});
-    // A drag starting inside an active native textarea cannot extend outside it without a source-level continuation.
-    let drag=null;
-    on(viewport,'pointerdown',e=>{drag=e.target===field && !source?{x:e.clientX,y:e.clientY,start:field}:null;});
-    on(document,'pointerup',e=>{
-      const d=drag;drag=null;
-      if(!d||d.start!==field||e.target===field||!doc.contains(e.target)||Math.hypot(e.clientX-d.x,e.clientY-d.y)<4)return;
-      const end=hitPoint(e.clientX,e.clientY);if(end==null)return;
-      const raw=text.slice(active.start,active.end), start=active.start+rawOffset(raw,end<active.start?field.selectionEnd:field.selectionStart);
-      choose(start,end,true,false);
+    // Keep native character/word selection within a field. Across blocks WebKit
+    // gives the textarea and the article separate selections, so track the two
+    // endpoints until mouseup, then give the whole range to one editable field.
+    let textDrag = null, consumeDragClick = false;
+    function clearTextDrag() {
+      textDrag = null;
+      viewport.classList.remove('sima-range-drag');
+      window.CSS?.highlights?.delete('sima-drag');
+    }
+    on(viewport,'mousedown',e=>{
+      clearTextDrag();
+      consumeDragClick = false;
+      if (source || composing || e.button !== 0 || e.ctrlKey || e.shiftKey ||
+          !e.target.closest('.sima-block') || e.target.closest('button,input,a,.sima-table-block,.sima-sized-image,dialog')) return;
+      const start = textEndpoint(e.clientX,e.clientY);
+      if (start) textDrag = {start, field:e.target === field, x:e.clientX, y:e.clientY};
     });
+    function dragEndpoint(e) {
+      if (!textDrag || Math.hypot(e.clientX-textDrag.x,e.clientY-textDrag.y) < 3) return null;
+      if (!textDrag.crossed && textDrag.field && document.elementFromPoint(e.clientX,e.clientY) === field) return null;
+      return textEndpoint(e.clientX,e.clientY);
+    }
+    on(document,'mousemove',e=>{
+      const end = dragEndpoint(e);
+      if (!end || end.offset === textDrag.start.offset) return;
+      textDrag.crossed = true;
+      if (!window.CSS?.highlights || !window.Highlight) return;
+      const [first,last] = textDrag.start.offset < end.offset ? [textDrag.start,end] : [end,textDrag.start];
+      const span = document.createRange();
+      span.setStart(first.caret.startContainer,first.caret.startOffset);
+      span.setEnd(last.caret.startContainer,last.caret.startOffset);
+      CSS.highlights.set('sima-drag',new Highlight(span));
+      viewport.classList.add('sima-range-drag');
+    });
+    on(document,'mouseup',e=>{
+      if (!textDrag || e.button !== 0) return;
+      const start = textDrag.start, end = dragEndpoint(e);
+      clearTextDrag();
+      if (!end || start.offset === end.offset) return;
+      consumeDragClick = true;
+      choose(start.offset,end.offset,true,false);
+    });
+    on(viewport,'click',e=>{
+      if (!consumeDragClick) return;
+      consumeDragClick = false;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    },{capture:true});
+    on(window,'blur',clearTextDrag);
     on(doc,'focusout',e=>{if(e.target.matches('.sima-table-cell-input')) mathView?.schedule();});
     draw(false);syncVisible();
     if (options.literal) filePreview = window.SimaFilePreview?.mount(viewport, {
