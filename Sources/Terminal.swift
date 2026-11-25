@@ -177,13 +177,28 @@ enum ResearchProvider: String, CaseIterable {
     static var selected: Self { Self(rawValue: UserDefaults.standard.string(forKey: "researchProvider") ?? "") ?? .codex }
     var binary: String { rawValue.lowercased() }
     var pathKey: String { self == .codex ? "cli" : "cli." + binary }
+    /// Non-interactive Claude runs cannot answer permission prompts, so every tool the research needs is pre-approved.
+    /// The set stays read-only: no Edit/Write tools, and Bash is limited to the data scripts of the search and Alpha派 skills.
+    static let claudeTools = "Read,Grep,Glob,WebSearch,WebFetch,Skill,Bash"
+    static let claudeAllowed = ["Read", "Grep", "Glob", "WebSearch", "WebFetch", "Skill",
+                                "mcp__claude_ai_Tavily", "mcp__claude_ai_Exa", "mcp__anysearch",
+                                "Bash(python3 *alphapai_client.py*)", "Bash(python *alphapai_client.py*)",
+                                "Bash(python3 *anysearch_cli.py*)", "Bash(python *anysearch_cli.py*)"]
+    /// Extra rules, comma separated, e.g. `defaults write local.feynman.research claude.allowedTools "mcp__wind-tools"`.
+    static func claudeResearch(knowledge: URL?) -> [String] {
+        let extra = (UserDefaults.standard.string(forKey: "claude.allowedTools") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        var args = ["--tools", claudeTools, "--allowedTools", (claudeAllowed + extra).joined(separator: ",")]
+        if let knowledge { args += ["--add-dir", knowledge.path] }
+        return args
+    }
     func arguments(action: Action, root: URL, project: URL, batch: Bool) -> [String] {
         switch self {
         case .codex: return Terminal.arguments(project: project, root: root, action: action)
         case .claude:
             var args = batch ? ["-p", "--output-format", "text"] : []
-            if batch && action != .archive { args += ["--tools", "Read,Grep,Glob,WebSearch,WebFetch"] }
-            if action == .publish || action == .archive { args += ["--add-dir", action == .archive ? project.path : root.path] }
+            if batch && action != .archive { args += Self.claudeResearch(knowledge: root) }
+            else if action == .publish { args += ["--add-dir", root.path] }
+            if action == .archive { args += ["--add-dir", project.path] }
             return args
         case .gemini:
             var args = batch ? ["--output-format", "text", "--approval-mode", action == .archive ? "default" : "plan"] : []

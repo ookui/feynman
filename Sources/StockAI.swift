@@ -58,6 +58,7 @@ struct StockAnswerStream {
     var wholeReport: Bool { modules.count > 1 }
     private var diagnostics = ""
     private var folder: URL?
+    private let knowledge: URL?
     private var generation = UUID()
     var current: StockModule? { modules.dropFirst(completed).first }
 
@@ -68,13 +69,20 @@ struct StockAnswerStream {
         modules = module.map { [$0] } ?? StockModule.allCases
         let template = modules.map(\.template).joined(separator: "\n\n")
         let linked = workspace.projects.filter { topic in company.info.stock?.links.contains { $0.projectID == topic.id } == true }.map { $0.info.title }
-        let model = workspace.stockBook.mainModel ?? "尚未指定"
-        prompt = """
-        研究公司：\(company.stockLabel)
-        研究范围：\(module?.heading ?? "全公司深研")
-        截至日期：\(Date().formatted(.iso8601.year().month().day()))
-        工作目录为本公司的深研目录。读取 project.json、research.json、analysis、references 和 documents 的相关原始资料和已有章节。业务拆分及竞争格局以 analysis/business.md 的当前正文为准。关联专题：\(linked.joined(separator: "、"))。主财务模型：\(model)。
-        按下列模板写中文投资研究。示例仅用于说明字段，业务和指标应适配本公司。使用可核验的资料，给出日期、财年、币种、单位、盈利口径和可点击的来源，区分披露、一致预期和自己的估算。无法核实的数字标明缺口。保留已有正文中的有效研究、图片、证据链接与手工记录。不得编造用户的持仓、交易、预期差或当时的决策。公司披露与估算相互区分。只返回 Markdown，文件由 Feynman 保存。
+        let knowledge = workspace.root
+        self.knowledge = knowledge
+        let materials = Self.materials(company.url)
+        var context = ["研究公司：\(company.stockLabel)", "研究范围：\(module?.heading ?? "全公司深研")", "截至日期：\(Date().formatted(.iso8601.year().month().day()))"]
+        if !linked.isEmpty { context.append("关联专题：" + linked.joined(separator: "、")) }
+        if let model = workspace.stockBook.mainModel { context.append("主财务模型：" + model) }
+        let local = materials.isEmpty
+            ? "工作目录为本公司的深研目录，目前没有已有章节或资料，直接依据外部资料研究。"
+            : "工作目录为本公司的深研目录。先读取已有资料：" + materials.joined(separator: "、") + "。保留已有正文中的有效研究、图片、证据链接与手工记录。" + (materials.contains("analysis/business.md") ? "业务拆分及竞争格局以 analysis/business.md 的当前正文为准。" : "")
+        let library = knowledge.map { "知识库根目录为 " + $0.path + "，可读取其中与本公司及关联专题相关的 Theses、Sources、Mechanisms 和 Library 资料。" } ?? ""
+        prompt = context.joined(separator: "\n") + "\n" + local + library + """
+
+        外部资料按 sling-search 的路由检索（anysearch、Tavily、Exa）；卖方研报、会议纪要和一致预期使用 alphapai-research；财务数字以公司公告和监管文件（SEC EDGAR、HKEXnews、巨潮资讯）为准，并给出可点击的原文链接。所有数字取自本次读取或检索到的资料，不使用模型记忆中的数据。
+        按下列模板写中文投资研究。示例仅用于说明字段，业务和指标应适配本公司。给出日期、财年、币种、单位、盈利口径和来源，区分披露、一致预期和自己的估算。检索后仍无法取得的数字，在对应位置标明缺口及其对结论的影响。报告只写研究内容，不描述会话、工具、权限或检索过程。不得编造用户的持仓、交易、预期差或当时的决策。只返回 Markdown，文件由 Feynman 保存。
 
         \(template)
         """
@@ -86,6 +94,23 @@ struct StockAnswerStream {
             """ + "\n" + modules.map { $0.heading + " → " + ($0.note! as NSString).lastPathComponent }.joined(separator: "\n")
             prompt += "\n第 10、12 章只写有依据的新增记录，没有新增时仅写 [无新增]。"
         }
+    }
+
+    /// Lists only materials that exist, so the prompt never asks the model to read missing files.
+    static func materials(_ company: URL) -> [String] {
+        func filled(_ path: String) -> Bool {
+            guard let text = try? Files.contents(company.appendingPathComponent(path)) else { return false }
+            return !text.clean.isEmpty
+        }
+        func populated(_ folder: String) -> Bool {
+            let items = (try? fm.contentsOfDirectory(atPath: company.appendingPathComponent(folder).path)) ?? []
+            return items.contains { !$0.hasPrefix(".") }
+        }
+        var found = ["project.json"]
+        if filled("research.json") { found.append("research.json") }
+        found += StockModule.allCases.compactMap(\.note).filter(filled)
+        found += ["references", "documents"].filter(populated).map { $0 + "/" }
+        return found.count == 1 ? [] : found
     }
 
     func instruction(for module: StockModule) -> String {
@@ -125,7 +150,7 @@ struct StockAnswerStream {
         case .codex:
             args = ["--search", "-C", company.url.path, "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--json", "--output-last-message", run.appendingPathComponent("answer.md").path, "-"]
         case .claude:
-            args = ["-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages", "--tools", "Read,Grep,Glob,WebSearch,WebFetch"]
+            args = ["-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages"] + ResearchProvider.claudeResearch(knowledge: knowledge)
         case .gemini:
             args = ["--output-format", "stream-json", "--approval-mode", "plan", "-p", "执行标准输入中的研究任务。"]
         }

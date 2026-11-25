@@ -19,6 +19,7 @@ Atlas 左侧的 Projects 打开专题，Stocks 打开公司主页。右侧图中
 - ⌘G 打开 Project Overview。单击节点可突出其关联，双击打开条目或文档，滚轮可缩放。在设置中可修改快捷键。
 - 在 Inquiries 或 Entities 条目的「更多」菜单、左栏右键菜单中，可添加或取消核心标记。核心条目在左栏加粗并显示星号。已有问题继续使用原目录和条目 ID。
 - 设置中的「研究终端」可选择 Codex、Gemini 或 Claude。各 CLI 使用各自的可执行文件路径和本机登录，设置页可检测所选 CLI 的版本。
+- Claude 的后台研究（`-p` 模式）无法弹出授权确认，工作台预先授权只读工具：Read、Grep、Glob、WebSearch、WebFetch、Skill，Tavily、Exa、anysearch 三个 MCP，以及 alphapai-research 和 anysearch 的数据脚本；知识库根目录以 `--add-dir` 开放读取。不授予 Edit、Write，正文由 Feynman 保存。需要追加的授权规则用逗号分隔写入 `defaults write local.feynman.research claude.allowedTools "规则1,规则2"`。
 
 ## 开始研究
 
