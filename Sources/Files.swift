@@ -149,8 +149,8 @@ struct Entry: Identifiable, Hashable {
         fields["anchors"] = try json(anchors); fields["links"] = try json(links); fields["assets"] = try json(assets)
         if standaloneMarkdown { fields["standalone_markdown"] = "true" }
         if !reportLinks.isEmpty || fields["report_links"] != nil { fields["report_links"] = try json(reportLinks) }
-        if !retiredAssets.isEmpty { fields["retired_assets"] = try json(retiredAssets) }
-        if !downloadedPDFs.isEmpty { fields["downloaded_pdfs"] = try json(downloadedPDFs) }
+        if !retiredAssets.isEmpty || fields["retired_assets"] != nil { fields["retired_assets"] = try json(retiredAssets) }
+        if !downloadedPDFs.isEmpty || fields["downloaded_pdfs"] != nil { fields["downloaded_pdfs"] = try json(downloadedPDFs) }
         if !archivedSources.isEmpty || fields["archived_sources"] != nil { fields["archived_sources"] = try json(archivedSources) }
         if !questionHistory.isEmpty || fields["question_history"] != nil { fields["question_history"] = try json(questionHistory) }
         if core { fields["core"] = "true" } else { fields.removeValue(forKey: "core") }
@@ -159,11 +159,20 @@ struct Entry: Identifiable, Hashable {
     }
 }
 
+struct StockLink: Codable, Hashable {
+    let projectID: String
+    let entityID: String
+}
+struct StockProfile: Codable, Hashable {
+    var ticker: String
+    var links: [StockLink]
+}
 struct Project: Codable, Identifiable, Hashable {
     var id = UUID().uuidString.lowercased()
     var title: String
     var intent: String
     var legacyDirectory: String?
+    var stock: StockProfile?
 }
 struct ProjectAt: Identifiable, Hashable {
     var info: Project
@@ -171,6 +180,10 @@ struct ProjectAt: Identifiable, Hashable {
     var id: String { info.id }
 }
 struct Snapshot {
+    var isStock = false
+    var topicNotes: [String] { isStock ? [] : ["memo.md", "log.md"] }
+    var indexedDocuments: [String] { reports + documents + topicNotes }
+
     var all: [Entry] = [] { didSet { indexEntries() } }
     private(set) var entries: [Entry] = []
     private var entryOffsets: [String: Int] = [:]
@@ -270,36 +283,50 @@ enum Files {
         try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey], options: [.skipsHiddenFiles]).sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
     static func projects(_ root: URL) throws -> [ProjectAt] {
-        let base = try child(root, "Feynman")
+        try catalog(root, stocks: false)
+    }
+    static func catalog(_ root: URL, stocks: Bool) throws -> [ProjectAt] {
+        let base = try child(root, stocks ? "Feynman/stocks" : "Feynman")
         guard fm.fileExists(atPath: base.path) else { return [] }
         return try list(base).compactMap { folder in
+            guard stocks || folder.lastPathComponent.lowercased() != "stocks" else { return nil }
             guard try folder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { return nil }
             let file = try child(base, folder.lastPathComponent + "/project.json")
             guard let raw = try contents(file) else { return nil }
             guard let project = decode(Project.self, raw) else { throw Failure("\(folder.lastPathComponent) 的 project.json 无法读取。") }
+            guard (project.stock != nil) == stocks else { return nil }
             return ProjectAt(info: project, url: folder)
         }
     }
     static func create(_ root: URL, title: String, intent: String, legacy: URL? = nil) throws -> ProjectAt {
         guard !title.clean.isEmpty, !title.contains("/"), !title.hasPrefix("."), title.utf8.count < 180 else { throw Failure("请输入有效的项目名称（不可包含斜线）。") }
-        let base = try child(root, "Feynman")
+        guard title.clean.lowercased() != "stocks" else { throw Failure("stocks 是个股目录，请选用其他专题名称。") }
+        return try createProject(root, folder: title.clean, info: Project(title: title.clean, intent: intent.clean), legacy: legacy)
+    }
+    static func createProject(_ root: URL, folder: String, info: Project, legacy: URL? = nil) throws -> ProjectAt {
+        let base = try child(root, info.stock == nil ? "Feynman" : "Feynman/stocks")
         try fm.createDirectory(at: base, withIntermediateDirectories: true)
-        let destination = try child(base, title.clean)
+        let destination = try child(base, folder)
         guard !fm.fileExists(atPath: destination.path) else { throw Failure("已存在同名项目。") }
         let stage = base.appendingPathComponent(".new-" + UUID().uuidString)
         try fm.createDirectory(at: stage, withIntermediateDirectories: false)
         defer { if fm.fileExists(atPath: stage.path) { try? fm.removeItem(at: stage) } }
-        var project = Project(title: title.clean, intent: intent.clean)
+        var project = info
         if let legacy {
             let prefix = root.standardizedFileURL.resolvingSymlinksInPath().path + "/"
             let path = legacy.standardizedFileURL.resolvingSymlinksInPath().path
             if path.hasPrefix(prefix) { project.legacyDirectory = String(path.dropFirst(prefix.count)) }
         }
-        for dir in Kind.allCases.map(\.rawValue) + ["reports", "references/files"] {
+        let directories = project.stock == nil ? Kind.allCases.map(\.rawValue) + ["reports", "references/files"] : ["analysis", "documents", "versions", "references/files"]
+        for dir in directories {
             try fm.createDirectory(at: try child(stage, dir), withIntermediateDirectories: true)
         }
         if let legacy { try importLegacy(legacy, into: stage) }
-        for (name, value) in [("project.json", try json(project)), ("memo.md", ""), ("log.md", ""), ("README.md", "# " + project.title + "\n\n" + project.intent)] {
+        var files = [("project.json", try json(project))]
+        if project.stock == nil {
+            files += [("memo.md", ""), ("log.md", ""), ("README.md", "# " + project.title + "\n\n" + project.intent)]
+        }
+        for (name, value) in files {
             let url = try child(stage, name)
             if !fm.fileExists(atPath: url.path) { try Data(value.utf8).write(to: url, options: .withoutOverwriting) }
         }
@@ -357,6 +384,7 @@ enum Files {
         var written = ""
         try locked(root) {
             let snapshot = try scan(root)
+            guard !snapshot.isStock || entry.kind == .references else { throw Failure("请在专题内建立此类条目。") }
             if entry.original != nil {
                 let live = snapshot.resolve(entry.id)
                 guard live?.id == entry.id else { throw Failure("条目已合并或删除，请重新选择当前条目。") }
@@ -401,10 +429,12 @@ enum Files {
             }
         }
     }
-    static func scan(_ root: URL) throws -> Snapshot {
+    static func scan(_ root: URL, stockDocuments: [String] = [], indexSources: Bool = true) throws -> Snapshot {
         var result = Snapshot()
+        let manifest = try contents(child(root, "project.json"))
+        result.isStock = decode(Project.self, manifest)?.stock != nil
         var entries: [Entry] = [], seen = Set<String>()
-        for k in Kind.allCases {
+        for k in result.isStock ? [.references] : Kind.allCases {
             let dir = try child(root, k.rawValue)
             guard fm.fileExists(atPath: dir.path) else { continue }
             for f in try list(dir) where f.pathExtension.lowercased() == "md" {
@@ -424,8 +454,14 @@ enum Files {
             }
         }
         result.all = entries
-        result.reports = try list(child(root, "reports")).filter { $0.pathExtension.lowercased() == "md" }.map { "reports/" + $0.lastPathComponent }
-        result.documents = ["README.md","questions.md","companies.md","challenge.md"].filter { fm.fileExists(atPath: root.appendingPathComponent($0).path) }
+        if result.isStock {
+            result.documents = stockDocuments
+        } else {
+            result.reports = try list(child(root, "reports")).filter { $0.pathExtension.lowercased() == "md" }.map { "reports/" + $0.lastPathComponent }
+            result.documents = ["README.md","questions.md","companies.md","challenge.md"].filter { fm.fileExists(atPath: root.appendingPathComponent($0).path) }
+            result.completed = fm.fileExists(atPath: try child(root, "preflight.done").path) && !result.reports.isEmpty
+        }
+        guard indexSources else { return result }
         let registered = Set(result.all.flatMap { $0.assets + $0.retiredAssets + Array($0.archivedSources.keys) })
         for folder in ["references", "references/files"] {
             let dir = try child(root, folder)
@@ -438,16 +474,15 @@ enum Files {
             }
         }
         try result.indexMaterials(in: root)
-        result.completed = fm.fileExists(atPath: try child(root, "preflight.done").path) && !result.reports.isEmpty
         return result
     }
-    private static func locked(_ root: URL, _ body: () throws -> Void) throws {
+    static func locked<T>(_ root: URL, _ body: () throws -> T) throws -> T {
         let fd = Darwin.open(root.path, O_RDONLY | O_DIRECTORY)
         guard fd >= 0 else { throw Failure("项目目录无法读取。") }
         defer { Darwin.close(fd) }
         guard flock(fd, LOCK_EX) == 0 else { throw Failure("项目正在被修改，请稍后重试。") }
         defer { flock(fd, LOCK_UN) }
-        try body()
+        return try body()
     }
     static func merge(_ source: Entry, into target: Entry, at root: URL) throws {
         guard source.kind == target.kind, source.id != target.id else { throw Failure("请选择同类的其他条目。") }
@@ -623,7 +658,7 @@ extension Snapshot {
                 referenceIDs[key, default: []].append(r.id)
             }
         }
-        for path in reports + documents + ["memo.md", "log.md"] {
+        for path in indexedDocuments {
             do { if let raw = try Files.contents(Files.child(root, path)) { index(Document(raw).body, path: path) } }
             catch { issues.append(path + "：" + error.localizedDescription) }
         }

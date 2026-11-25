@@ -52,6 +52,7 @@ import PDFKit
 
         let model = Workspace()
         model.open(project)
+        model.go(.doc(reportPath), fragment: "季报")
         model.search = "wrong"
         model.search = "ai 資本开支"
         try await ready(model)
@@ -83,6 +84,11 @@ import PDFKit
         try check(index.results("ai 资本开支", entriesOnly: true).count == 2, "选择器保留条目范围")
         model.openSearchItem(hits[1].item)
         try check(model.searchHits.map(\.id) == hits.map(\.id), "点开命中保留左侧列表")
+        model.openSearchOccurrence(hits.first!, nil)
+        let resultPage = model.place
+        model.searchDocument = reportPath
+        try check(!model.escapeSearch() && model.search.isEmpty && model.place == resultPage && model.searchDocument == reportPath, "第一次 Escape 只清空关键词，保留当前页和搜索范围")
+        try check(model.escapeSearch() && model.place == .doc(reportPath) && model.headingFragment == "季报" && model.searchDocument == nil && model.searchNavigation == nil, "第二次 Escape 返回搜索前的文件与章节")
         model.retainSearchItems(hits.map(\.item))
         model.retainSearchItems([hits[0].item])
         model.search = ""

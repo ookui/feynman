@@ -28,10 +28,14 @@ struct Reader: NSViewRepresentable {
     var extract = false
     var questionHistory: [ResearchTurn]? = nil
     var allowsEditing = true
+    var cardSections: [StockCardSection]?
+    var onCardHeight: ((CGFloat) -> Void)?
     func makeCoordinator() -> Bridge { Bridge(model) }
     func makeNSView(context: Context) -> WKWebView {
+        context.coordinator.cardSections = cardSections
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(context.coordinator, forURLScheme: "feynman-image")
+        config.setURLSchemeHandler(context.coordinator, forURLScheme: "feynman-media")
         config.userContentController.add(context.coordinator, name: "reader")
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "notePaste")
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "tableCopy")
@@ -39,10 +43,19 @@ struct Reader: NSViewRepresentable {
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "imageImport")
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
-        if let url = Bundle.main.url(forResource: "reader", withExtension: "html") { web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent()) }
+        if let url = Bundle.main.url(forResource: cardSections == nil ? "reader" : "stock-card", withExtension: "html") { web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent()) }
         return web
     }
     func updateNSView(_ web: WKWebView, context: Context) {
+        if let cardSections {
+            let bridge = context.coordinator
+            bridge.onCardHeight = onCardHeight
+            if bridge.cardSections != cardSections {
+                bridge.cardSections = cardSections
+                bridge.render(web)
+            }
+            return
+        }
         let marks = model.snapshot.entries.flatMap { e in e.anchors.filter { $0.report == path }.map { Mark(id: e.id, kind: e.kind.rawValue, title: e.title, anchor: $0) } }
         let bridge = context.coordinator
         let scroll = bridge.data?.file == path ? bridge.data!.scroll : UserDefaults.standard.double(forKey: bridge.scrollKey(path))
@@ -73,6 +86,8 @@ struct Reader: NSViewRepresentable {
     }
     @MainActor final class Bridge: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKScriptMessageHandlerWithReply, WKURLSchemeHandler {
         let model: Workspace; var data: ReaderData?; var ready = false
+        var cardSections: [StockCardSection]?
+        var onCardHeight: ((CGFloat) -> Void)?
         var rich = false
         var imagePreview: ReaderImagePanel?
         init(_ model: Workspace) { self.model = model }
@@ -82,13 +97,19 @@ struct Reader: NSViewRepresentable {
         func scrollKey(_ path: String) -> String { "scroll." + (model.project?.id ?? "") + "." + path }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready = true; render(webView) }
         func render(_ web: WKWebView) {
-            guard ready, let data, let raw = try? json(data) else { return }
+            guard ready else { return }
+            if let cardSections {
+                if let raw = try? json(cardSections) { web.evaluateJavaScript("renderCard(" + raw + ")") }
+                return
+            }
+            guard let data, let raw = try? json(data) else { return }
             web.evaluateJavaScript("render(" + raw + ")") { _, e in if let e { self.model.error = e.localizedDescription } }
         }
-        func localImage(_ request: URL) throws -> (URL, String) {
-            guard let path = data?.file, request.scheme == "feynman-image", request.host == "local",
+        func localMedia(_ request: URL) throws -> (URL, String) {
+            guard ["feynman-image", "feynman-media"].contains(request.scheme), request.host == "local",
                   let parts = URLComponents(url: request, resolvingAgainstBaseURL: false)?.queryItems,
-                  parts.first(where: { $0.name == "file" })?.value == path,
+                  let path = parts.first(where: { $0.name == "file" })?.value,
+                  path == data?.file || cardSections?.contains(where: { $0.path == path }) == true,
                   let encoded = parts.first(where: { $0.name == "src" })?.value,
                   let relative = encoded.removingPercentEncoding,
                   !relative.hasPrefix("/"), URL(string: relative)?.scheme == nil else { throw Failure("图片路径无效。") }
@@ -96,6 +117,11 @@ struct Reader: NSViewRepresentable {
             let image = directory.appendingPathComponent(relative).standardizedFileURL.resolvingSymlinksInPath()
             let key = try model.documentKey(for: image)
             if key.hasPrefix("lakehouse:"), !path.hasPrefix("lakehouse:") { throw Failure("图片超出工作目录。") }
+            if request.scheme == "feynman-media" {
+                guard let type = UTType(filenameExtension: image.pathExtension), type.conforms(to: .movie),
+                      let mime = type.preferredMIMEType else { throw Failure("视频格式无效。") }
+                return (image, mime)
+            }
             if image.pathExtension.lowercased() == "svg" { return (image,"image/svg+xml") }
             guard let type = UTType(filenameExtension: image.pathExtension), type.conforms(to: .image),
                   let source = CGImageSourceCreateWithURL(image as CFURL, nil),
@@ -106,7 +132,7 @@ struct Reader: NSViewRepresentable {
         func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
             do {
                 guard let request = task.request.url else { throw Failure("图片路径无效。") }
-                let (image, mime) = try localImage(request)
+                let (image, mime) = try localMedia(request)
                 let bytes = try Data(contentsOf: image, options: .mappedIfSafe)
                 task.didReceive(URLResponse(url: request, mimeType: mime, expectedContentLength: bytes.count, textEncodingName: nil))
                 task.didReceive(bytes)
@@ -116,7 +142,8 @@ struct Reader: NSViewRepresentable {
         func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            decisionHandler(action.request.url == Bundle.main.url(forResource: rich ? "markdown" : "reader", withExtension: "html") ? .allow : .cancel)
+            let page = cardSections != nil ? "stock-card" : rich ? "markdown" : "reader"
+            decisionHandler(action.request.url == Bundle.main.url(forResource: page, withExtension: "html") ? .allow : .cancel)
         }
 
         var pasteboard: NSPasteboard = .general
@@ -186,6 +213,28 @@ struct Reader: NSViewRepresentable {
             catch { replyHandler(nil, error.localizedDescription) }
         }
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if let cardSections {
+                guard message.frameInfo.isMainFrame, let event = message.body as? [String: Any] else { return }
+                switch event["action"] as? String {
+                case "height":
+                    if let h = event["height"] as? CGFloat, h.isFinite { onCardHeight?(h) }
+                case "link":
+                    if let path = event["file"] as? String, cardSections.contains(where: { $0.path == path }),
+                       let href = event["href"] as? String { model.follow(href, from: path) }
+                case "model":
+                    if let path = model.stockBook.mainModel { model.openStockFile(path) }
+                case "pageScroll":
+                    if let dy = event["delta"] as? CGFloat, dy.isFinite, let scroll = message.webView?.enclosingScrollView {
+                        let clip = scroll.contentView
+                        var bounds = clip.bounds
+                        bounds.origin.y += clip.isFlipped ? dy : -dy
+                        clip.scroll(to: clip.constrainBoundsRect(bounds).origin)
+                        scroll.reflectScrolledClipView(clip)
+                    }
+                default: break
+                }
+                return
+            }
             guard message.frameInfo.isMainFrame, let m = message.body as? [String:Any], let path = m["file"] as? String, data?.file == path else { return }
             switch m["action"] as? String {
             case "error": model.error = m["message"] as? String
@@ -298,6 +347,7 @@ extension Workspace {
                 if let fragment { go(place, fragment: fragment) }
                 return
             }
+            if target.hasPrefix("feynman://research?") { try followEvidence(href); return }
             if target.hasPrefix("feynman:") {
                 guard let e = snapshot.resolve(String(target.dropFirst(8))) else { throw Failure("关联条目已删除或尚未同步。") }
                 go(.entry(e.id), fragment: fragment); return

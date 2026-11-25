@@ -313,7 +313,7 @@ struct ProjectSearchIndex {
                 otherTitles: sources.map(materialLabel), bodies: bodies,
                 aliases: e.aliases.map { "entry:" + $0 } + (sources + Array(e.archivedSources.keys)).map { "material:" + $0 })
         }
-        for path in snapshot.reports + snapshot.documents + ["memo.md", "log.md"] {
+        for path in snapshot.indexedDocuments {
             if Task.isCancelled { return }
             guard let raw = try? Files.contents(Files.child(root, path)) else { continue }
             let doc = Document(raw)

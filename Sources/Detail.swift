@@ -10,7 +10,12 @@ struct ProjectDetail: View {
     }
     @ViewBuilder var body: some View {
         switch m.place {
-        case .overview: overview
+        case .judgments: StockThesis(m: m, company: p).id(p.id)
+        case .stock(let module): StockModulePage(m: m, company: p, module: module).id(p.id + module.rawValue)
+        case .judgmentEditor: StockJudgmentEditor(m: m, company: p)
+        case .overview:
+            if p.info.stock != nil { StockHome(m: m, company: p).id(p.id) }
+            else { overview }
         case .preliminary: preliminary
         case .group(.references): ReferenceDirectory(m: m)
         case .webLinks: ReferencePage(m: m)
@@ -18,7 +23,9 @@ struct ProjectDetail: View {
         case .entry, .doc:
             let item = m.displayedEntry
             let document: String? = { if case .doc(let path) = m.place { return path }; return nil }()
-            if let item, item.kind == .references {
+            if let document, let module = m.stockModule(for: m.place), module.note == document {
+                StockModulePage(m: m, company: p, module: module).id(p.id + module.rawValue)
+            } else if let item, item.kind == .references {
                 ReferenceFilePage(m: m, entry: item, document: document).id(document ?? item.id)
             } else if let path = document ?? item?.path {
                 notePage(path: path, entry: item)
@@ -124,7 +131,7 @@ struct ProjectDetail: View {
             if case .failure(let err) = result, m.inlineNote?.path != path { Text(err.localizedDescription).padding() }
             else {
                 NoteBody(m: m, path: path, text: body,
-                         extract: entry == nil && (path.hasPrefix("reports/") || path == "questions.md"),
+                         extract: p.info.stock == nil && entry == nil && (path.hasPrefix("reports/") || path == "questions.md"),
                          history: entry?.kind == .questions ? entry?.questionHistory : nil)
             }
         }
@@ -140,6 +147,9 @@ struct ProjectDetail: View {
                         .buttonStyle(ResearchActionStyle())
                 }
                 Button("关联…") { m.dialog = .relate(e) }
+                if e.kind == .entities, p.info.stock == nil {
+                    EntityStockActions(m: m, topic: p, entity: e).id(e.id)
+                }
                 Menu("更多") {
                     Button(e.core ? "取消核心标记" : "标为核心条目") { m.toggleCore(e) }
                     if e.kind != .questions { Button("用 AI 修订正文") { m.launch(.revise, context:e.path) } }
@@ -169,7 +179,7 @@ struct ProjectDetail: View {
     private func documentActions(_ path: String, _ body: String) -> some View {
         PageActions {
             if path == "memo.md", !body.clean.isEmpty { Button("回写到知识库…") { m.launch(.publish,context:path) } }
-            if path.hasPrefix("reports/") {
+            if p.info.stock == nil && path.hasPrefix("reports/") {
                 Button("用 AI 修订报告") { m.launch(.revise, context:path) }
                 Button("查看出处") { m.inspect.toggle() }
             }

@@ -107,7 +107,7 @@
       if(!node) tip.hidden=true;
       else {
         tip.firstElementChild.textContent=node.title;
-        tip.lastElementChild.textContent=node.path;
+        tip.lastElementChild.textContent=node.group || node.path;
         tip.hidden=false;
         tip.style.left=clamp(sx(node)+12,4,width-tip.offsetWidth-4)+'px';
         tip.style.top=clamp(sy(node)+12,4,height-tip.offsetHeight-4)+'px';
@@ -154,7 +154,12 @@
         hitCells.get(cell).push(n);
         ctx.globalAlpha=related(n)?1:.17;
         ctx.fillStyle=n.color||accent;
-        ctx.beginPath(); ctx.arc(sx(n),sy(n),radius(n),0,Math.PI*2); ctx.fill();
+        ctx.beginPath();
+        if (n.group==='Projects') {
+          const r=radius(n);
+          ctx.roundRect(sx(n)-r,sy(n)-r,2*r,2*r,r*.32);
+        } else ctx.arc(sx(n),sy(n),radius(n),0,Math.PI*2);
+        ctx.fill();
         if(n===focusNode || n===hovered) {
           ctx.strokeStyle=accent; ctx.lineWidth=1.6;
           ctx.beginPath(); ctx.arc(sx(n),sy(n),radius(n)+3.5,0,Math.PI*2); ctx.stroke();

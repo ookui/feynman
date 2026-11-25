@@ -99,7 +99,7 @@ struct MarkdownCommands: Commands {
             item("Align Column Right","table.alignRight")
         }
         CommandGroup(after: .sidebar) {
-            Button("Project Overview") { model.go(.overview) }
+            Button { model.go(.overview) } label: { Text(model.project?.info.stock == nil ? "Project Overview" : "Company Home") }
                 .keyboardShortcut(OverviewShortcut(overviewKey).map { KeyboardShortcut($0.key, modifiers: $0.modifiers) })
                 .disabled(model.project == nil || model.dialog != nil)
         }
@@ -113,6 +113,8 @@ extension Notification.Name {
 extension Workspace {
     var currentNotePath: String? {
         switch place {
+        case .stock(let module): return module.note
+        case .judgmentEditor: return stockBook.draft?.path
         case .doc(let path): return path
         case .entry(let id): return snapshot.resolve(id)?.path
         default: return nil

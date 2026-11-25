@@ -9,7 +9,7 @@ struct EntryActions: View {
     var body: some View {
         Button(entry.core ? "取消核心标记" : "标为核心条目") { m.toggleCore(entry) }
         Button("关联条目…") { m.dialog = .relate(entry) }
-        if entry.kind == .references { ReportLinksMenu(m: m, entry: entry) }
+        if entry.kind == .references && m.project?.info.stock == nil { ReportLinksMenu(m: m, entry: entry) }
         Button("合并到其他条目…") { m.dialog = .merge(entry) }
         Divider()
         Button("删除…", role: .destructive) { m.dialog = .remove(entry) }
@@ -50,7 +50,7 @@ struct ReferenceFileDrop: ViewModifier {
                     Task { await m.importDroppedReferences(providers, into: project) }
                     return true
                 }
-                .overlay { if targeted { RoundedRectangle(cornerRadius: 6).strokeBorder(leaf, lineWidth: 2).allowsHitTesting(false) } }
+                .overlay { if targeted { RoundedRectangle(cornerRadius: 6).strokeBorder(.tint, lineWidth: 2).allowsHitTesting(false) } }
         } else { content }
     }
 }
@@ -66,11 +66,13 @@ struct AddReferenceActions: View {
 
 struct ReferenceDirectory: View {
     @ObservedObject var m: Workspace
+    @State private var companyDocuments: [URL] = []
+    @State private var legacyStockReports: [String] = []
     var body: some View {
         let entries = m.snapshot.entries.filter { $0.kind == .references }
         let webCount = entries.filter(m.snapshot.isWebReference).count + m.snapshot.unlistedMaterials.filter(MaterialLinks.isWeb).count
         VStack(alignment: .leading, spacing: 0) {
-            PageHeading(title: "参考资料", category: .kind(.references),
+            PageHeading(title: m.project?.info.stock == nil ? "参考资料" : "References", category: .kind(.references),
                         subtitle: "拖入 PDF 链接可下载原件，其他网页收进「网页链接」。也可直接拖入本地文件。") {
                 PageActions {
                     AddReferenceActions(m: m)
@@ -79,6 +81,25 @@ struct ReferenceDirectory: View {
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    if m.project?.info.stock != nil {
+                        ForEach(companyDocuments, id: \.self) { file in
+                            let path = "documents/" + file.lastPathComponent
+                            let workbook = StockFiles.workbookTypes.contains(file.pathExtension.lowercased())
+                            fileRow(file.lastPathComponent, symbol: workbook ? "tablecells" : "doc", core: path == m.stockBook.mainModel) {
+                                m.openStockFile(path)
+                            }.contextMenu {
+                                Button("复制文档链接") { m.copyEvidence(file.lastPathComponent, target: "file:" + path) }
+                                if workbook && path != m.stockBook.mainModel {
+                                    Button("设为主模型") { m.attempt { try m.modifyBook { $0.mainModel = path } } }
+                                }
+                                removeMaterial("project:" + path)
+                            }
+                        }
+                        ForEach(legacyStockReports, id: \.self) { path in
+                            fileRow(documentLabel(path), symbol: "doc.text") { m.go(.doc(path)) }
+                                .contextMenu { removeMaterial("project:" + path) }
+                        }
+                    }
                     fileRow("网页链接（" + String(webCount) + "）", symbol: "link") { m.go(.webLinks) }
                     ForEach(entries.filter { !m.snapshot.isWebReference($0) }) { entry in
                         fileRow(entry.title, symbol: "doc", core: entry.core) { m.go(.entry(entry.id)) }
@@ -86,15 +107,32 @@ struct ReferenceDirectory: View {
                     }
                     ForEach(m.snapshot.unlistedMaterials.filter { !MaterialLinks.isWeb($0) }, id: \.self) { source in
                         fileRow(materialLabel(source), symbol: "doc") { m.attempt { m.go(.entry(try m.registerMaterial(source).id)) } }
+                            .contextMenu { removeMaterial(source) }
                     }
                 }.padding(.horizontal, 16)
             }
         }.modifier(ReferenceFileDrop(m: m))
+        .task(id: m.revision) {
+            guard let company = m.project, company.info.stock != nil else { companyDocuments = []; legacyStockReports = []; return }
+            m.attempt {
+                companyDocuments = try StockFiles.documents(in: company)
+                legacyStockReports = try StockFiles.legacyReports(in: company)
+            }
+        }
+    }
+    private func removeMaterial(_ source: String) -> some View {
+        Button("删除…", role: .destructive) { m.dialog = .removeMaterial(source) }
     }
     private func fileRow(_ title: String, symbol: String, core: Bool = false, open: @escaping () -> Void) -> some View {
         VStack(spacing: 0) {
             Button(action: open) {
-                HStack { Label(title, systemImage: symbol).fontWeight(core ? .bold : .regular); Spacer(); Image(systemName: "chevron.right").font(.caption) }
+                HStack {
+                    Label { Text(title).fontWeight(core ? .bold : .regular).foregroundStyle(ink) } icon: {
+                        Image(systemName: symbol).foregroundStyle(PageCategory.kind(.references).color)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                }
                     .padding(.vertical, 10).contentShape(Rectangle())
             }.buttonStyle(SidebarLinkStyle(color: PageCategory.kind(.references).color, verticalInset: 0))
             Divider()
@@ -103,6 +141,7 @@ struct ReferenceDirectory: View {
 }
 
 struct ReferencePage: View {
+    @Environment(\.activeStockModule) private var module
     @ObservedObject var m: Workspace
     var body: some View {
         let links = m.snapshot.entries.filter(m.snapshot.isWebReference)
@@ -115,11 +154,12 @@ struct ReferencePage: View {
             List {
                 ForEach(links) { entry in
                     Button { m.go(.entry(entry.id)) } label: { Label(entry.title, systemImage: "link").fontWeight(entry.core ? .bold : .regular) }
-                        .buttonStyle(SidebarLinkStyle(color: PageCategory.webLinks.color)).contextMenu { EntryActions(m: m, entry: entry) }
+                        .buttonStyle(SidebarLinkStyle(color: (module?.category ?? .webLinks).color)).contextMenu { EntryActions(m: m, entry: entry) }
                 }
                 ForEach(unlisted, id: \.self) { source in
                     Button(materialLabel(source)) { m.attempt { m.go(.entry(try m.registerMaterial(source).id)) } }
-                        .buttonStyle(SidebarLinkStyle(color: PageCategory.webLinks.color))
+                        .buttonStyle(SidebarLinkStyle(color: (module?.category ?? .webLinks).color))
+                        .contextMenu { Button("删除…", role: .destructive) { m.dialog = .removeMaterial(source) } }
                 }
                 if links.isEmpty && unlisted.isEmpty { Text("尚未添加网页链接。").foregroundStyle(.secondary) }
             }
@@ -150,10 +190,12 @@ struct ReferenceFilePage: View {
                         }.fixedSize()
                     }
                     Button("关联…") { m.dialog = .relate(entry) }
-                    Button("引用到 Memo") { m.editDoc("memo.md", append: "[" + entry.title + "](feynman:" + entry.id + ")") }
+                    if m.project?.info.stock == nil {
+                        Button("引用到 Memo") { m.editDoc("memo.md", append: "[" + entry.title + "](feynman:" + entry.id + ")") }
+                    }
                     Menu("更多") {
                         Button(entry.core ? "取消核心标记" : "标为核心条目") { m.toggleCore(entry) }
-                        ReportLinksMenu(m: m, entry: entry)
+                        if m.project?.info.stock == nil { ReportLinksMenu(m: m, entry: entry) }
                         if let file { Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([file]) } }
                         let targets = m.snapshot.archiveSources(for: entry)
                         if targets.count == 1, let item = targets.first {

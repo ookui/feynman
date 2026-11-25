@@ -24,6 +24,14 @@ struct Panels: View {
             return byID[id]
         }
     }
+    @ViewBuilder private func referenceRemoval(_ target: ReferenceRemoval) -> some View {
+        Text("删除本项目中的资料文件及其关联。引用处保留文字，外部文件和网页保留原件。")
+        HStack { Spacer(); cancel(); Button("删除", role: .destructive) { m.attempt {
+            try m.deleteReference(target)
+            m.dialog = nil
+            m.go(.group(.references))
+        } } }
+    }
     @State private var loadedBacklinks: [Backlink] = []
     @State private var backlinkStatus = "正在查找…"
     struct Backlink: Identifiable { var project: ProjectAt; var entry: Entry; var id: String { project.id + "/" + entry.id } }
@@ -32,6 +40,8 @@ struct Panels: View {
             switch dialog {
             case .editor(let editor): EditorPanel(m:m,draft:editor)
             case .settings: SettingsPanel(m:m)
+            case .stockResearch(let id):
+                if let job = m.stockRun, job.id == id { StockResearchPanel(job: job) }
             default: VStack(alignment:.leading,spacing:16) { contents }.padding(24).frame(width:510)
             }
         }.background(paper)
@@ -95,17 +105,24 @@ struct Panels: View {
             }.disabled(current == nil || !options.contains { $0.id == picked }).keyboardShortcut(.defaultAction) }
         case .remove(let e):
             Text("删除「" + e.title + "」？").font(.title3.bold())
-            Text("同时移除项目中指向此条目的关联。报告和 Memo 保留原文，指向已删条目的链接将显示为普通文字。")
-            HStack { Spacer(); cancel(); Button("删除",role:.destructive) { m.attempt { var item=e; item.deleted=true; try m.store(item); m.dialog=nil; m.go(.group(e.kind)) } } }
+            if e.kind == .references {
+                referenceRemoval(.entry(e))
+            } else {
+                Text("同时移除项目中指向此条目的关联。报告和 Memo 保留原文，指向已删条目的链接将显示为普通文字。")
+                HStack { Spacer(); cancel(); Button("删除",role:.destructive) { m.attempt { var item=e; item.deleted=true; try m.store(item); m.dialog=nil; m.go(.group(e.kind)) } } }
+            }
+        case .removeMaterial(let source):
+            Text("删除「" + materialLabel(source) + "」？").font(.title3.bold())
+            referenceRemoval(.source(source))
         case .cite(let e):
             Text("回写到知识库").font(.title3.bold()); Text("在工作台终端中交给研究终端整理「" + e.title + "」，按当前知识库规范写入并记录反向引用。")
             HStack { Spacer(); cancel(); Button("打开终端") { m.dialog=nil; m.launch(.publish,context:e.path) }.keyboardShortcut(.defaultAction) }
         case .backlinks(let asset):
             Text("引用这份资料的项目").font(.title3.bold()); Text(String(asset.dropFirst(8))).font(.caption).foregroundStyle(.secondary)
             if loadedBacklinks.isEmpty { Text(backlinkStatus) }
-            ScrollView { VStack(alignment:.leading) { ForEach(loadedBacklinks) { hit in Button(hit.project.info.title + " › " + hit.entry.title) { m.dialog=nil; m.open(hit.project); m.go(.entry(hit.entry.id)) }.buttonStyle(.link) } } }.frame(maxHeight:230)
+            ScrollView { VStack(alignment:.leading) { ForEach(loadedBacklinks) { hit in Button(hit.project.info.title + " › " + hit.entry.title) { m.dialog=nil; m.open(hit.project, at: .entry(hit.entry.id)) }.buttonStyle(.link) } } }.frame(maxHeight:230)
                 .task {
-                    let projects = m.projects
+                    let projects = m.projects + m.stocks
                     do {
                         loadedBacklinks = try await Task.detached {
                             var results: [Backlink] = []
@@ -250,6 +267,7 @@ struct SettingsPanel: View {
     @State var prompt = Terminal.instruction(.preflight)
     @State var test = ""
     @State var detected = ""
+    @State private var claudeDesktop: URL?
     @State private var menuLanguage = MenuLanguage.selected
     var body: some View {
         VStack(alignment:.leading,spacing:14) {
@@ -267,12 +285,20 @@ struct SettingsPanel: View {
             HStack { Text(m.root?.path ?? "尚未选择").lineLimit(2).textSelection(.enabled); Spacer(); Button("选择…") { if let url=m.chooseFolder("选择知识库或工作目录，新项目将保存在其中的 Feynman 目录") { m.setRoot(url) } } }
             Divider()
             OverviewShortcutSetting()
-            Picker("研究终端", selection: $provider) {
+            Text("AI 研究设置").font(.headline)
+            Picker("默认 AI 服务", selection: $provider) {
                 ForEach(ResearchProvider.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }.pickerStyle(.segmented).onChange(of: provider) { _, next in
                 cli = UserDefaults.standard.string(forKey: next.pathKey) ?? ""
                 test = ""
                 detect()
+            }
+            if provider == .claude {
+                LabeledContent("Claude Desktop") {
+                    Text(claudeDesktop?.path ?? "未检测到桌面应用").lineLimit(2).textSelection(.enabled)
+                    Button("重新检测") { detect() }
+                }
+                Text("自动研究与章节回写使用 Claude Code 命令行").font(.subheadline)
             }
             HStack { TextField("自动检测，或输入可执行文件路径",text:$cli); Button("浏览…") { let panel=NSOpenPanel(); if panel.runModal() == .OK, let url=panel.url { cli=url.path } } }
             Text(detected).lineLimit(2).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
@@ -285,6 +311,7 @@ struct SettingsPanel: View {
                 }
             }; Text(test).font(.caption) }
             Divider()
+            Text("行业专题研究指令").font(.headline)
             Picker("研究动作",selection:$action) { ForEach(Action.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
             if action == .question { Text("由当前研究终端直接回答问题").foregroundStyle(.secondary) }
             else { TextField("Skill 名称（可留空）",text:$skill) }
@@ -297,5 +324,11 @@ struct SettingsPanel: View {
         .onChange(of:skill) { persist() }.onChange(of:prompt) { persist() }
     }
     func persist() { UserDefaults.standard.set(skill.clean,forKey:"skill." + action.rawValue); UserDefaults.standard.set(prompt,forKey:"prompt." + action.rawValue) }
-    func detect() { do { detected=try Terminal.executable(cli, provider: provider).path } catch { detected=error.localizedDescription } }
+    func detect() {
+        if provider == .claude {
+            claudeDesktop = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.anthropic.claudefordesktop")
+        }
+        do { detected = try Terminal.executable(cli, provider: provider).path }
+        catch { detected = error.localizedDescription }
+    }
 }

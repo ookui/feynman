@@ -3,15 +3,20 @@ import WebKit
 import UniformTypeIdentifiers
 
 enum Place: Hashable {
-    case overview, preliminary, webLinks, group(Kind), entry(String), doc(String)
+    case stock(StockModule)
+    case judgments, judgmentEditor, overview, preliminary, webLinks, group(Kind), entry(String), doc(String)
     var key: String {
-        switch self { case .overview: return "home"; case .preliminary: return "preliminary"; case .webLinks: return "web-links"; case .group(let k): return "group:" + k.rawValue
+        switch self { case .stock(let module): return "stock:" + module.rawValue; case .judgments: return "judgment-history"; case .judgmentEditor: return "judgment-editor"; case .overview: return "home"; case .preliminary: return "preliminary"; case .webLinks: return "web-links"; case .group(let k): return "group:" + k.rawValue
         case .entry(let id): return "entry:" + id; case .doc(let path): return "doc:" + path }
     }
     init(_ key: String?) {
         guard let key else { self = .overview; return }
         let value = String(key.drop { $0 != ":" }.dropFirst())
-        if key == "preliminary" { self = .preliminary }
+        if key == "stock:competition" { self = .stock(.business) }
+        else if key.hasPrefix("stock:"), let module = StockModule(rawValue: value) { self = module.destination }
+        else if key == "judgment-history" { self = .judgments }
+        else if key == "judgment-editor" { self = .judgmentEditor }
+        else if key == "preliminary" { self = .preliminary }
         else if key == "web-links" { self = .webLinks }
         else if key.hasPrefix("doc:") { self = .doc(value) }
         else if key.hasPrefix("entry:") { self = .entry(value) }
@@ -21,6 +26,8 @@ enum Place: Hashable {
 }
 enum HistoryMove { case back, forward, first, last }
 private struct Visit {
+    var projectID: String?
+    var historyRecord: UUID? = nil
     var place: Place
     var anchor: Anchor?
     var passage: [Anchor] = []
@@ -42,15 +49,18 @@ struct Editor: Identifiable {
     var cloudCopies: [CloudCopy] = []
 }
 enum Dialog: Identifiable {
-    case create, settings, continueProject, editor(Editor), merge(Entry), relate(Entry), remove(Entry), backlinks(String), cite(Entry)
+    case stockResearch(UUID)
+    case create, settings, continueProject, editor(Editor), merge(Entry), relate(Entry), remove(Entry), removeMaterial(String), backlinks(String), cite(Entry)
     var id: String {
         switch self {
+        case .stockResearch(let id): return id.uuidString
         case .continueProject: return "continueProject"
         case .create: return "create"
         case .settings: return "settings"
         case .editor(let e): return e.id.uuidString
         case .merge(let e): return "merge:" + e.id
         case .relate(let e): return "relate:" + e.id
+        case .removeMaterial(let key): return "remove-material:" + key
         case .remove(let e): return "remove:" + e.id
         case .backlinks(let path): return "backlinks:" + path
         case .cite(let e): return "publish:" + e.id
@@ -60,6 +70,15 @@ enum Dialog: Identifiable {
 @MainActor final class Workspace: ObservableObject {
     @Published var root: URL?
     @Published var projects: [ProjectAt] = []
+    @Published var stocks: [ProjectAt] = []
+    private var mergedBusinessNotes: [String: String] = [:]
+    @Published var stockRun: StockResearchRun?
+    @Published var stockBook = StockBook()
+    var stockBookOriginal: String?
+    @Published var stockHistorySelection: [String: Set<UUID>] = [:]
+    var lastHistoryRecord: [String: UUID] = [:]
+    @Published var historyScrollTarget: UUID?
+    @Published var stockHistoryYear: [String: Int] = [:]
     @Published var project: ProjectAt?
     @Published var snapshot = Snapshot()
     @Published var place: Place = .overview
@@ -90,7 +109,7 @@ enum Dialog: Identifiable {
     @Published var revision = 0
     @Published var expanded: Set<String> = [] {
         didSet {
-            if let project, expanded != oldValue { preferences.set(expanded.sorted(), forKey: "outlineExpanded." + project.id) }
+            if let project, project.info.stock == nil, expanded != oldValue { preferences.set(expanded.sorted(), forKey: "outlineExpanded." + project.id) }
         }
     }
     @Published var searchOptions = ProjectSearchOptions() { didSet { updateSearch() } }
@@ -98,7 +117,37 @@ enum Dialog: Identifiable {
     @Published var searchLanding: SearchOccurrence?
     @Published var searchNavigation: UUID?
     weak var readerWeb: WKWebView?
-    @Published var search = "" { didSet { updateSearch() } }
+    private var searchOrigin: Visit?
+    @Published var search = "" {
+        didSet {
+            if searchOrigin == nil, !search.isEmpty, project != nil { searchOrigin = currentVisit }
+            updateSearch()
+        }
+    }
+
+    /// Returns true when the field should relinquish keyboard focus.
+    func escapeSearch() -> Bool {
+        if !search.isEmpty {
+            search = ""
+            return false
+        }
+        guard finishInlineNote() else { return false }
+        if var origin = searchOrigin, origin.projectID == project?.id {
+            if !valid(origin.place) { origin = Visit(projectID: project?.id, place: .overview) }
+            if place != origin.place {
+                if valid(place) { previousVisits.append(currentVisit) }
+                nextVisits = []
+            }
+            display(origin)
+        }
+        searchOrigin = nil
+        searchDocument = nil
+        return true
+    }
+
+    func leaveEmptySearch() {
+        if search.isEmpty { searchOrigin = nil }
+    }
     @Published private(set) var searchIndex = ProjectSearchIndex()
     @Published private(set) var searchHits: [ProjectSearchHit] = []
     @Published private(set) var searchPending = false
@@ -146,6 +195,7 @@ enum Dialog: Identifiable {
     }
 
     private func resetSearch(for project: ProjectAt?) {
+        searchOrigin = nil
         indexTask?.cancel()
         indexing = false
         searchIndex = ProjectSearchIndex()
@@ -190,38 +240,60 @@ enum Dialog: Identifiable {
     @Published private var nextVisits: [Visit] = []
     var canGoBack: Bool { !previousVisits.isEmpty }
     var canGoForward: Bool { !nextVisits.isEmpty }
-    private var currentVisit: Visit { Visit(place: place, anchor: focus, passage: passage, fragment: headingFragment) }
+    private var currentVisit: Visit { Visit(projectID: project?.id, historyRecord: place == .judgments ? project.flatMap { lastHistoryRecord[$0.id] } : nil, place: place, anchor: focus, passage: passage, fragment: headingFragment) }
     var generation = 0
     var refreshing = false
     var lastSignature: String?
     private let preferences = UserDefaults.standard
     private let linkConfiguration: URLSessionConfiguration
-    init(linkConfiguration: URLSessionConfiguration = .ephemeral) {
+    init(linkConfiguration: URLSessionConfiguration = .ephemeral, initialRoot: URL? = nil) {
         self.linkConfiguration = linkConfiguration
         let home = fm.homeDirectoryForCurrentUser
         let candidates = ["LakeHouse", "Library/Mobile Documents/com~apple~CloudDocs/LakeHouse"]
-        root = preferences.string(forKey: "workspace").map { URL(fileURLWithPath: $0) } ?? candidates.map { home.appendingPathComponent($0) }.first { fm.fileExists(atPath: $0.path) }
+        root = initialRoot ?? preferences.string(forKey: "workspace").map { URL(fileURLWithPath: $0) } ?? candidates.map { home.appendingPathComponent($0) }.first { fm.fileExists(atPath: $0.path) }
         refreshProjects()
     }
     func attempt(_ body: () throws -> Void) { do { try body() } catch { self.error = error.localizedDescription } }
-    func refreshProjects() { if let root { attempt { projects = try Files.projects(root) } } }
+    func refreshProjects() {
+        guard let root else { return }
+        attempt { projects = try Files.projects(root) }
+        attempt {
+            stocks = try Files.catalog(root, stocks: true)
+            if let active = project, active.info.stock != nil, let latest = stocks.first(where: { $0.id == active.id }), latest != active {
+                project = latest
+            }
+        }
+    }
     func chooseFolder(_ text: String) -> URL? {
         let panel = NSOpenPanel(); panel.message = text; panel.canChooseFiles = false; panel.canChooseDirectories = true
         return panel.runModal() == .OK ? panel.url : nil
     }
     func setRoot(_ value: URL) {
         guard finishInlineNote() else { return }
-        root = value; preferences.set(value.path, forKey: "workspace"); home(); refreshProjects()
+        home(); previousVisits = []; nextVisits = []; stockHistorySelection = [:]; stockHistoryYear = [:]
+        root = value; projects = []; stocks = []; preferences.set(value.path, forKey: "workspace"); refreshProjects()
     }
-    func open(_ p: ProjectAt) {
+    func open(_ p: ProjectAt, at destination: Place? = nil, fragment: String? = nil) {
         guard finishInlineNote() else { return }
+        if project?.id == p.id { go(destination ?? .overview, fragment: fragment); return }
+        if project != nil || destination != nil { previousVisits.append(currentVisit) }
+        nextVisits = []
+        loadProject(p)
+        if let destination { display(Visit(projectID: p.id, place: valid(destination) ? destination : .overview, fragment: fragment)) }
+    }
+    private func loadProject(_ p: ProjectAt) {
+        historyScrollTarget = nil
         generation += 1; project = p; snapshot = Snapshot(); lastSignature = nil; resetSearch(for: p); focus = nil; headingFragment = nil; inspect = false
         hiddenGraphFilters = preferences.stringArray(forKey: "hiddenGraphFilters." + p.id).map(Set.init) ?? PageCategory.defaultHiddenGraphFilters
-        previousVisits = []; nextVisits = []
+        stockBook = StockBook(); stockBookOriginal = nil; mergedBusinessNotes = [:]
         refresh()
         let dest = Place(preferences.string(forKey: "last." + p.id))
-        place = valid(dest) ? dest : .overview
-        if let saved = preferences.stringArray(forKey: "outlineExpanded." + p.id) {
+        let restored = canonicalVisit(Visit(projectID: p.id, place: dest))
+        place = valid(restored.place) ? restored.place : .overview
+        headingFragment = restored.fragment
+        if p.info.stock != nil {
+            expanded = []
+        } else if let saved = preferences.stringArray(forKey: "outlineExpanded." + p.id) {
             expanded = Set(saved)
         } else {
             expanded = Set(snapshot.entries.map { $0.kind.rawValue } + ["reports"])
@@ -230,10 +302,14 @@ enum Dialog: Identifiable {
     }
     func valid(_ p: Place) -> Bool {
         switch p {
+        case .preliminary: return project?.info.stock == nil
+        case .group(let kind): return project?.info.stock == nil || kind == .references
+        case .stock, .judgments: return project?.info.stock != nil
+        case .judgmentEditor: return project?.info.stock != nil && stockBook.draft != nil
         case .entry(let id): return snapshot.resolve(id) != nil
         case .doc(let path):
-            guard !snapshot.deletedPaths.contains(path) else { return false }
-            if snapshot.documents.contains(path) || snapshot.reports.contains(path) || ["memo.md","log.md"].contains(path) { return true }
+            guard !snapshot.deletedPaths.contains(path), allowsDocument(path) else { return false }
+            if snapshot.indexedDocuments.contains(path) { return true }
             guard let url = try? documentURL(path), Self.isMarkdown(url) || referenceDocument(path) != nil else { return false }
             return (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
         default: return true
@@ -241,16 +317,23 @@ enum Dialog: Identifiable {
     }
     func home() {
         guard finishInlineNote() else { return }
+        if project != nil { previousVisits.append(currentVisit); nextVisits = [] }
+        loadAtlas()
+        refreshProjects()
+    }
+    private func loadAtlas() {
+        historyScrollTarget = nil
         generation += 1; project = nil; place = .overview; snapshot = Snapshot(); notice = ""; focus = nil; headingFragment = nil; inspect = false; resetSearch(for: nil)
-        previousVisits = []; nextVisits = []
+        stockBook = StockBook(); stockBookOriginal = nil; mergedBusinessNotes = [:]
     }
     func go(_ p: Place, anchor: Anchor? = nil, fragment: String? = nil) {
         guard finishInlineNote() else { return }
+        guard project?.info.stock == nil || valid(p) else { return }
         if place != p || focus != anchor || headingFragment != fragment {
             if valid(place) { previousVisits.append(currentVisit) }
             nextVisits = []
         }
-        display(Visit(place: p, anchor: anchor, fragment: fragment))
+        display(Visit(projectID: project?.id, place: p, anchor: anchor, fragment: fragment))
     }
     func navigate(_ move: HistoryMove) {
         guard finishInlineNote() else { return }
@@ -260,19 +343,37 @@ enum Dialog: Identifiable {
         var visit = currentVisit
         for _ in 0..<(move == .first || move == .last ? steps : 1) {
             if backward {
-                if valid(visit.place) { nextVisits.append(visit) }
+                nextVisits.append(visit)
                 visit = previousVisits.removeLast()
             } else {
-                if valid(visit.place) { previousVisits.append(visit) }
+                previousVisits.append(visit)
                 visit = nextVisits.removeLast()
             }
         }
+        if visit.projectID != project?.id {
+            if let id = visit.projectID {
+                guard let target = (projects + stocks).first(where: { $0.id == id }) else { notice = "项目已移走。"; return }
+                loadProject(target)
+            } else { loadAtlas(); refreshProjects() }
+        }
+        if !valid(visit.place) { visit.place = .overview }
         visit.passage.removeAll { snapshot.owners(of: [$0]).isEmpty }
         if let anchor = visit.anchor, snapshot.owners(of: [anchor]).isEmpty { visit.anchor = nil }
         display(visit)
     }
-    private func display(_ visit: Visit) {
+    private func canonicalVisit(_ visit: Visit) -> Visit {
+        guard case .doc(let path) = visit.place else { return visit }
+        let local = path.hasPrefix("project:") ? String(path.dropFirst(8)) : path
+        guard let heading = mergedBusinessNotes[local] else { return visit }
+        var result = visit
+        result.place = .stock(.business)
+        result.fragment = visit.fragment ?? heading
+        return result
+    }
+    private func display(_ destination: Visit) {
+        let visit = canonicalVisit(destination)
         let p = visit.place
+        historyScrollTarget = visit.historyRecord
         searchNavigation = nil
         searchLanding = nil
         readingPosition = nil
@@ -281,20 +382,35 @@ enum Dialog: Identifiable {
         if case .entry(let id) = p, let e = snapshot.resolve(id) { expanded.insert(e.kind.rawValue) }
     }
     func refresh() {
+        if let active = project, active.info.stock != nil, !fm.fileExists(atPath: active.url.path) {
+            refreshProjects()
+            guard let relocated = stocks.first(where: { $0.id == active.id }) else {
+                notice = "公司目录已移走。"; return
+            }
+            project = relocated
+        }
         guard let project else { refreshProjects(); return }
         attempt {
-            try Files.upgradeLegacySelections(in: project.url)
-            snapshot = try Files.scan(project.url)
+            var stockDocuments: [String] = []
+            if project.info.stock != nil {
+                mergedBusinessNotes = try StockNotes.consolidate(in: project)
+                stockDocuments = StockModule.allCases.compactMap(\.note).filter { fm.fileExists(atPath: project.url.appendingPathComponent($0).path) }
+                let (book, raw) = try StockFiles.load(project)
+                if raw != stockBookOriginal { stockBook = book; stockBookOriginal = raw }
+            } else {
+                try Files.upgradeLegacySelections(in: project.url)
+            }
+            snapshot = try Files.scan(project.url, stockDocuments: stockDocuments)
             if snapshot.needsLinkCleanup {
                 try Files.resumeLinkCleanup(in: project.url)
-                snapshot = try Files.scan(project.url)
+                snapshot = try Files.scan(project.url, stockDocuments: stockDocuments)
             }
             if snapshot.needsArchiveUpdate {
                 try Files.updateArchivedAssets(in: project.url)
-                snapshot = try Files.scan(project.url)
+                snapshot = try Files.scan(project.url, stockDocuments: stockDocuments)
             }
-            previousVisits.removeAll { !valid($0.place) }
-            nextVisits.removeAll { !valid($0.place) }
+            previousVisits.removeAll { $0.projectID == project.id && !valid($0.place) }
+            nextVisits.removeAll { $0.projectID == project.id && !valid($0.place) }
             passage.removeAll { snapshot.owners(of: [$0]).isEmpty }
             if let focus, snapshot.owners(of: [focus]).isEmpty { self.focus = nil }
             rebuildSearchIndex(project)
@@ -307,7 +423,7 @@ enum Dialog: Identifiable {
         refreshing = true
         let token = generation
         DispatchQueue.global(qos: .utility).async {
-            let stamp = Self.signature(p.url)
+            let stamp = Self.signature(p.url, stock: p.info.stock != nil)
             DispatchQueue.main.async {
                 self.refreshing = false
                 guard token == self.generation, self.lastSignature != stamp else { return }
@@ -319,13 +435,18 @@ enum Dialog: Identifiable {
             }
         }
     }
-    nonisolated static func signature(_ root: URL) -> String {
-        let dirs = [""] + Kind.allCases.map(\.rawValue) + ["reports", "references/files", Files.referenceMetadataDirectory, "annotations"]
+    nonisolated static func signature(_ root: URL, stock: Bool = false) -> String {
+        var dirs = ["", "references/files", Files.referenceMetadataDirectory]
+        if stock {
+            dirs += ["references", "documents", "analysis", StockNotes.segmentDirectory]
+            let parent = root.appendingPathComponent(StockNotes.segmentDirectory)
+            dirs += ((try? Files.list(parent)) ?? []).filter { UUID(uuidString: $0.lastPathComponent) != nil }.map { StockNotes.segmentDirectory + "/" + $0.lastPathComponent }
+        } else { dirs += Kind.allCases.map(\.rawValue) + ["reports", "annotations", "documents"] }
         let keys: [URLResourceKey] = [.contentModificationDateKey,.fileSizeKey]
         return dirs.flatMap { dir -> [String] in
             let base = dir.isEmpty ? root : root.appendingPathComponent(dir)
             let urls = (try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
-            return urls.map { url in
+            return urls.filter { !stock || !dir.isEmpty || ["project.json", "research.json"].contains($0.lastPathComponent) }.map { url in
                 let v = try? url.resourceValues(forKeys: Set(keys))
                 return dir + "/" + url.lastPathComponent + ":\(v?.contentModificationDate?.timeIntervalSince1970 ?? 0):\(v?.fileSize ?? 0)"
             }
@@ -356,7 +477,7 @@ enum Dialog: Identifiable {
 
     func referenceDocument(_ path: String) -> Entry? {
         if let entry = snapshot.entry(at: path) { return entry.kind == .references ? entry : nil }
-        if snapshot.documents.contains(path) || snapshot.reports.contains(path) || ["memo.md", "log.md"].contains(path) { return nil }
+        if snapshot.indexedDocuments.contains(path) { return nil }
         let key = ["project:", "library:", "lakehouse:"].contains(where: path.hasPrefix) ? path : "project:" + path
         return snapshot.reference(for: key, from: path)
     }
@@ -369,13 +490,22 @@ enum Dialog: Identifiable {
         }
     }
 
+    private func allowsDocument(_ path: String) -> Bool {
+        guard project?.info.stock != nil else { return true }
+        let relative = path.hasPrefix("project:") ? String(path.dropFirst(8)) : path
+        let topicOnly = ["memo.md", "log.md", "README.md", "questions.md", "companies.md", "challenge.md"]
+        if topicOnly.contains(relative) { return false }
+        let directory = relative.split(separator: "/").first.map(String.init) ?? ""
+        return directory != "annotations" && Kind(rawValue: directory).map { $0 == .references } != false
+    }
+
     func canEditNote(_ path: String) -> Bool {
         guard !path.hasPrefix("library:"), !path.hasPrefix("lakehouse:"),
               !path.hasPrefix("references/"), !path.hasPrefix("project:references/"),
               let file = try? documentURL(path), Self.isMarkdown(file),
               let key = try? documentKey(for: file), !key.hasPrefix("library:"), !key.hasPrefix("lakehouse:"),
-              !key.hasPrefix("references/"), referenceDocument(key) == nil else { return false }
-        return true
+              allowsDocument(key), !key.hasPrefix("references/"), referenceDocument(key) == nil else { return false }
+        return mergedBusinessNotes[key] == nil && (project?.info.stock == nil || !StockModule.allCases.contains { $0.appendOnly && $0.note == key })
     }
 
     func toggleCore(_ entry: Entry) {
@@ -443,10 +573,11 @@ enum Dialog: Identifiable {
     }
     var hasPreflight: Bool { snapshot.completed || !snapshot.reports.isEmpty }
     func researchProject() {
+        guard let project, project.info.stock == nil else { return }
         if hasPreflight { dialog = .continueProject } else { launch(.preflight) }
     }
     func launch(_ action: Action, context: String? = nil) {
-        guard let project, let root else { return }
+        guard let project, let root, project.info.stock == nil || action != .preflight else { return }
         attempt {
             let provider = ResearchProvider.selected
             let cli = try Terminal.executable(preferences.string(forKey: provider.pathKey) ?? "", provider: provider)

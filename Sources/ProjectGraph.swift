@@ -7,6 +7,7 @@ struct ProjectGraphData: Codable, Equatable {
         let path: String
         let title: String
         let color: String
+        var group: String? = nil
     }
     let nodes: [Node]
     let edges: [[Int]]
@@ -14,6 +15,20 @@ struct ProjectGraphData: Codable, Equatable {
         "png", "apng", "jpg", "jpeg", "jfif", "jp2", "jxl", "gif", "webp", "avif",
         "heic", "heif", "tif", "tiff", "bmp", "ico", "svg", "svgz"
     ]
+
+    init(projects: [ProjectAt], stocks: [ProjectAt]) {
+        nodes = projects.map { Node(path: "topic/" + $0.id, title: $0.info.title, color: PageCategory.project.cssColor, group: "Projects") }
+            + stocks.map { Node(path: "stock/" + $0.id, title: $0.info.title, color: PageCategory.stock.cssColor, group: "Stocks") }
+        var links = Set<[Int]>()
+        for (index, stock) in stocks.enumerated() {
+            for link in stock.info.stock?.links ?? [] {
+                if let topic = projects.firstIndex(where: { $0.id == link.projectID }) {
+                    links.insert([topic, projects.count + index])
+                }
+            }
+        }
+        edges = links.sorted { $0.lexicographicallyPrecedes($1) }
+    }
 
     init(_ snapshot: Snapshot, hidden: Set<String>) {
         func visible(_ category: PageCategory) -> Bool { !hidden.contains(category.graphFilterKey) }
@@ -33,7 +48,7 @@ struct ProjectGraphData: Codable, Equatable {
             guard visible(category) else { return nil }
             return Node(path: entry.path, title: (entry.core ? "★ " : "") + entry.title, color: category.cssColor)
         }
-        let documents = Set(snapshot.reports + snapshot.documents + ["memo.md", "log.md"])
+        let documents = Set(snapshot.indexedDocuments)
         rows += documents.sorted().compactMap { path in
             let category: PageCategory = snapshot.documents.contains(path) ? .documents : PageCategory(document: path)
             return visible(category) ? Node(path: path, title: documentLabel(path), color: category.cssColor) : nil
@@ -68,18 +83,27 @@ struct ProjectGraphData: Codable, Equatable {
 
 struct ProjectGraph: NSViewRepresentable {
     @ObservedObject var model: Workspace
+    var atlas = false
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         let model: Workspace
+        var atlas = false
         var ready = false
         var data: ProjectGraphData?
         init(_ model: Workspace) { self.model = model }
         func draw(_ web: WKWebView) {
             guard ready, let data, let value = try? json(data) else { return }
-            web.evaluateJavaScript("projectGraph.update(" + value + ")")
+            web.evaluateJavaScript("updateGraph(" + value + ", " + (atlas ? "true" : "false") + ")")
         }
         func webView(_ web: WKWebView, didFinish navigation: WKNavigation!) { ready = true; draw(web) }
         @MainActor func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard let path = message.body as? String, data?.nodes.contains(where: { $0.path == path }) == true else { return }
+            if atlas {
+                let stock = path.hasPrefix("stock/")
+                if let p = (stock ? model.stocks : model.projects).first(where: { (stock ? "stock/" : "topic/") + $0.id == path }) {
+                    model.open(p, at: .overview)
+                }
+                return
+            }
             if let e = model.snapshot.entry(at: path) { model.go(.entry(e.id)) }
             else if model.valid(.doc(path)) { model.go(.doc(path)) }
             else { model.attempt { try model.openMaterial(path) } }
@@ -97,7 +121,8 @@ struct ProjectGraph: NSViewRepresentable {
         return web
     }
     func updateNSView(_ web: WKWebView, context: Context) {
-        let next = ProjectGraphData(model.snapshot, hidden: model.hiddenGraphFilters)
+        context.coordinator.atlas = atlas
+        let next = atlas ? ProjectGraphData(projects: model.projects, stocks: model.stocks) : ProjectGraphData(model.snapshot, hidden: model.hiddenGraphFilters)
         if context.coordinator.data != next { context.coordinator.data = next; context.coordinator.draw(web) }
     }
     static func dismantleNSView(_ web: WKWebView, coordinator: Coordinator) {

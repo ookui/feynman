@@ -28,12 +28,16 @@ struct Primary: ButtonStyle {
 }
 @MainActor final class FeynmanDelegate: NSObject, NSApplicationDelegate {
     weak var workspace: Workspace?
+    func applicationWillTerminate(_ notification: Notification) { workspace?.stockRun?.cancel() }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         workspace?.finishInlineNote() == false ? .terminateCancel : .terminateNow
     }
 }
 
-@main struct FeynmanApp: App {
+#if !FEYNMAN_TESTS
+@main
+#endif
+struct FeynmanApp: App {
     @NSApplicationDelegateAdaptor(FeynmanDelegate.self) private var delegate
     @StateObject var model = Workspace()
     var body: some Scene {
@@ -46,11 +50,13 @@ struct Primary: ButtonStyle {
             MarkdownCommands(model: model)
             HistoryCommands(model: model)
             CommandMenu("Research") {
-                Button("Project List") { model.home(); model.refreshProjects() }.keyboardShortcut("l", modifiers: [.command,.shift])
+                Button("Atlas") { model.home() }.keyboardShortcut("l", modifiers: [.command,.shift])
                 Button("Refresh Files") { model.refresh() }.keyboardShortcut("r")
-                Button { model.researchProject() } label: {
-                    if model.hasPreflight { Text("Continue Project Research…") } else { Text("Start Preliminary Research") }
-                }.disabled(model.project == nil)
+                if model.project?.info.stock == nil {
+                    Button { model.researchProject() } label: {
+                        if model.hasPreflight { Text("Continue Project Research…") } else { Text("Start Preliminary Research") }
+                    }.disabled(model.project == nil)
+                }
             }
         }
     }
@@ -86,12 +92,14 @@ struct MainView: View {
     @ObservedObject var model: Workspace
     @State private var sidebar = true
     @State private var searchFocusRequest = 0
+    @FocusState private var searchFocused: Bool
     @State private var historyKeyMonitor: Any?
     @AppStorage("outlineWidth") private var outlineWidth = 236.0
     @AppStorage("relationsWidth") private var relationsWidth = 0.0
     let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     var body: some View {
         GeometryReader { geometry in
+            let stockModule = model.stockModule(for: model.place)
             let maxOutline = max(155, min(490, geometry.size.width - 555))
             let outline = max(155, min(outlineWidth, maxOutline))
             let available = geometry.size.width - (sidebar ? outline + 9 : 0)
@@ -100,7 +108,7 @@ struct MainView: View {
             let relations = max(220, min(preferred, maxRelations))
             HStack(spacing: 0) {
             if sidebar {
-                Sidebar(m: model, focusRequest: searchFocusRequest).frame(width: outline).background(rail)
+                Sidebar(searchFocused: $searchFocused, m: model, focusRequest: searchFocusRequest).frame(width: outline).background(rail)
                 PaneDivider(label: "大纲宽度", width: outline, direction: 1) {
                     outlineWidth = max(155, min($0, maxOutline))
                 }
@@ -108,21 +116,25 @@ struct MainView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 3) {
                     Button { sidebar.toggle() } label: { Image(systemName:"sidebar.left") }.help("切换大纲")
-                    if model.project != nil {
+                    if !sidebar && model.project != nil {
+                        Button { model.home(); sidebar = true } label: { Image(systemName: "house") }.help("Atlas")
+                    }
+                    if model.project != nil || model.canGoBack || model.canGoForward {
                         Button { if model.canGoBack { model.navigate(.back) } else { model.home() } } label: { Image(systemName:"chevron.left") }.help(model.canGoBack ? "返回上一页" : "返回项目列表")
                         Button { model.navigate(.forward) } label: { Image(systemName:"chevron.right") }.help("前进").disabled(!model.canGoForward)
                     }
-                    Text(model.project?.info.title ?? "项目空间").lineLimit(1)
+                    Text(model.project?.info.title ?? "Atlas").lineLimit(1)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                         .overlay(WindowTitleSurface())
                     if let p = model.project {
+                        Button { model.copyEvidence(model.displayedEntry?.title ?? model.currentNotePath.map(documentLabel) ?? p.info.title, target: model.place.key) } label: { Image(systemName:"link") }.help("复制此页的 Markdown 研究链接")
                         Button { NSWorkspace.shared.activateFileViewerSelecting([p.url]) } label: { Image(systemName:"folder") }.help("在 Finder 中显示项目")
                         if let recent = model.consoles.last(where: { $0.project.id == p.id }) {
                             Button { model.selectedConsole = model.activeConsole == nil ? recent.id : nil } label: { Image(systemName:"terminal") }.help("显示或收起研究终端")
                         }
                         Button { if model.displayedEntry != nil { model.showEntryRelations.toggle() } else { model.inspect.toggle() } } label: { Image(systemName:"sidebar.right") }.help("显示关联与出处")
                     }
-                    Button { model.dialog = .settings } label: { Image(systemName:"gearshape") }.help("本机设置")
+                    Button { model.dialog = .settings } label: { Label("AI 设置", systemImage:"gearshape").labelStyle(.titleAndIcon) }.buttonStyle(.borderless).fixedSize().help("设置 AI 研究服务与 CLI 路径")
                 }.buttonStyle(ToolbarIconStyle()).foregroundStyle(leaf).padding(.horizontal,14).frame(height:48)
 
                 Divider()
@@ -144,10 +156,21 @@ struct MainView: View {
                             }
                             Inspector(m:model).frame(width: relations)
                         }
-                    }.frame(minHeight:170)
+                    }.environment(\.activeStockModule, stockModule)
+                    .tint(stockModule?.category.color ?? leaf)
+                    .frame(minHeight:170)
                     if let session = model.activeConsole {
                         ResearchPanel(model:model, session:session).frame(minHeight: geometry.size.height / 3).focusedValue(\.editingNavigationKeys, true)
                     }
+                }
+                if let job = model.stockRun, job.company.id == model.project?.id, !job.status.isEmpty {
+                    HStack {
+                        Image(systemName: "sparkles")
+                        Text(job.status).lineLimit(1)
+                        Spacer()
+                        Button("查看研究") { model.dialog = .stockResearch(job.id) }
+                        if !job.running { Button("关闭") { model.stockRun = nil } }
+                    }.font(.callout).padding(8).background(rail)
                 }
                 if !model.notice.isEmpty || !model.snapshot.issues.isEmpty {
                     HStack { Text(model.notice.isEmpty ? model.snapshot.issues.joined(separator:" · ") : model.notice).font(.caption); Spacer(); Button("关闭") { model.notice = ""; model.snapshot.issues = [] }.buttonStyle(.plain) }.padding(8).background(rail)
@@ -160,8 +183,13 @@ struct MainView: View {
             historyKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 guard let window = event.window, window === NSApp.mainWindow, window.isKeyWindow,
                       window.attachedSheet == nil, NSApp.modalWindow == nil, model.dialog == nil,
-                      model.project != nil else { return event }
+                      (model.project != nil || model.canGoBack || model.canGoForward) else { return event }
                 let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+                if event.keyCode == 53, modifiers.isEmpty, searchFocused {
+                    if (window.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return event }
+                    if !event.isARepeat, model.escapeSearch() { searchFocused = false }
+                    return nil
+                }
                 if event.keyCode == 53, modifiers.isEmpty, let session = model.activeConsole,
                    session.handlesEscape {
                     if model.inlineNote != nil || window.firstResponder is NoteTextView || (window.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return event }
@@ -309,7 +337,7 @@ private struct ButtonHighlight: ViewModifier {
 }
 
 struct Sidebar: View {
-    @FocusState private var searchFocused: Bool
+    @FocusState.Binding var searchFocused: Bool
     @State private var collapsedResults = Set<String>()
     @State private var rowLimits: [String:Int] = [:]
     @ObservedObject var m: Workspace
@@ -330,16 +358,20 @@ struct Sidebar: View {
         VStack(alignment:.leading,spacing:0) {
             HStack(spacing:9) { Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high).frame(width:32,height:32); Text("Feynman").font(.system(size:23,weight:.medium,design:.serif)).lineLimit(1).minimumScaleFactor(0.8) }.padding(.leading,18).padding(.top,17).padding(.bottom,20)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button { m.home(); m.refreshProjects() } label: {
-                Label { Text("All Projects").bold() } icon: {
+            Button { m.home() } label: {
+                Label { Text(verbatim: "Atlas").font(.system(size: 16, weight: .bold)).foregroundStyle(ink) } icon: {
                     Image(systemName: "house").foregroundStyle(PageCategory.project.color)
                 }
-            }.buttonStyle(SidebarLinkStyle(selected: m.project == nil, horizontalInset: 8, verticalInset: 8)).padding(.horizontal,10)
+            }.buttonStyle(SidebarLinkStyle(selected: m.project == nil, color: PageCategory.project.color, horizontalInset: 8, verticalInset: 8)).padding(.horizontal,10)
             Divider().padding(.vertical,8)
             if m.project != nil {
                 HStack(spacing: 4) {
                     TextField("搜索标题和正文", text: $m.search).focused($searchFocused).task(id: focusRequest) { if focusRequest > 0 { searchFocused = true } }.focusedValue(\.editingNavigationKeys, true)
                         .textFieldStyle(.roundedBorder)
+                        .onExitCommand {
+                            if searchFocused, m.escapeSearch() { searchFocused = false }
+                        }
+                        .onChange(of: searchFocused) { _, focused in if !focused { m.leaveEmptySearch() } }
                     if !m.search.isEmpty {
                         Button { m.search = ""; m.searchDocument = nil } label: { Image(systemName: "xmark.circle.fill") }
                             .buttonStyle(.plain).foregroundStyle(.secondary).help("清空搜索")
@@ -364,12 +396,33 @@ struct Sidebar: View {
                         let retained = m.retainedItems
                         let pinned = Set(retained.map(\.id))
                         if m.search.clean.isEmpty {
-                            if !retained.isEmpty {
+                            if m.project?.info.stock == nil && !retained.isEmpty {
                                 Text("已保留").font(.caption.bold()).foregroundStyle(.secondary)
                                 ForEach(retained) { item in searchRow(item, snippet: nil, pinned: true) }
                                 Divider().padding(.vertical, 6)
                             }
-                            outline
+                            if let company = m.project, company.info.stock != nil {
+                                Button { m.go(.overview) } label: {
+                                    Label {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(verbatim: company.stockDisplayName).font(.system(size: 13, weight: .semibold)).foregroundStyle(ink)
+                                            if let ticker = company.info.stock?.ticker, !ticker.isEmpty {
+                                                Text(verbatim: ticker).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    } icon: { Image(systemName: "house").foregroundStyle(PageCategory.stock.color) }
+                                }.buttonStyle(SidebarLinkStyle(selected: m.place == .overview, color: PageCategory.stock.color, verticalInset: 6))
+                                    .help("打开公司首页").accessibilityIdentifier("stock.home")
+                                    .padding(.bottom, 4)
+                                ForEach(StockModule.allCases, id: \.self) { module in
+                                    Button { m.openStockModule(module) } label: {
+                                        Label { Text(verbatim: module.heading).foregroundStyle(ink) } icon: {
+                                            Image(systemName: module.symbol).foregroundStyle(module.category.color)
+                                        }
+                                    }.buttonStyle(SidebarLinkStyle(selected: m.stockModule(for: m.place) == module, color: module.category.color, verticalInset: 7))
+                                        .accessibilityIdentifier("stock.module." + module.rawValue)
+                                }
+                            } else { outline }
                         } else {
                             HStack {
                                 if m.searchPending || m.indexing { Text("正在搜索…") }
@@ -411,8 +464,7 @@ struct Sidebar: View {
                     }.padding(.horizontal,10)
                 }
             } else {
-                Text("项目").font(.caption).foregroundStyle(.secondary).padding(.horizontal,18).padding(.vertical,8)
-                ScrollView { VStack(alignment:.leading) { ForEach(m.projects) { p in Button { m.open(p) } label:{ Text(p.info.title) }.buttonStyle(SidebarLinkStyle()) } }.padding(.horizontal,12) }
+                AtlasSidebar(m: m)
             }
             Spacer(minLength:4)
             Divider()
@@ -454,6 +506,7 @@ struct Sidebar: View {
                     row("网页链接", .webLinks, .webLinks).padding(.leading, 27).modifier(ReferenceFileDrop(m: m))
                     ForEach(m.snapshot.unlistedMaterials.filter { !MaterialLinks.isWeb($0) },id:\.self) { path in
                         Button { m.attempt { m.go(.entry(try m.registerMaterial(path).id)) } } label: { Text((path as NSString).lastPathComponent).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()) }.buttonStyle(SidebarLinkStyle(color: PageCategory.kind(k).color)).padding(.leading,42)
+                            .contextMenu { Button("删除…", role: .destructive) { m.dialog = .removeMaterial(path) } }
                     }
                 }
                 ForEach(entries.filter { !m.snapshot.isWebReference($0) }) { e in
@@ -516,30 +569,19 @@ struct Sidebar: View {
 struct LibraryView: View {
     @ObservedObject var m: Workspace
     var body: some View {
-        ScrollView {
-            VStack(alignment:.leading,spacing:20) {
-                PageHeading(title: "研究项目", category: .project) {
-                    Button { m.dialog = .create } label:{ Label("新建项目",systemImage:"plus") }.buttonStyle(Primary())
-                }
-                VStack(alignment: .leading, spacing: 20) {
-                    if m.projects.isEmpty {
-                        VStack(alignment:.leading,spacing:12) {
-                            Image(systemName:"folder.badge.plus").font(.system(size:30)).foregroundStyle(leaf)
-                            Text("创建第一个研究项目").font(.title3.weight(.medium))
-                            Text("为专题命名后，即可在项目工作台开始预研。").foregroundStyle(.secondary)
-                        }.padding(24).frame(maxWidth:.infinity,alignment:.leading).background(rail.opacity(0.65),in:RoundedRectangle(cornerRadius:12))
-                    } else {
-                        ForEach(m.projects) { p in
-                            Button { m.open(p) } label: {
-                                HStack(spacing:15) { Image(systemName:"folder").foregroundStyle(leaf).font(.title3)
-                                    VStack(alignment:.leading,spacing:5) { Text(p.info.title).font(.title3.weight(.medium)); if !p.info.intent.isEmpty { Text(p.info.intent).foregroundStyle(.secondary).lineLimit(2) } }; Spacer(); Image(systemName:"chevron.right").foregroundStyle(.secondary)
-                                }.padding(.vertical,12).contentShape(Rectangle())
-                            }.buttonStyle(.plain)
-                            Divider()
-                        }
+        VStack(spacing: 0) {
+            PageHeading(title: "Atlas", category: .project, showsTag: false) {
+                HStack(spacing: 14) {
+                    Label { Text("Projects · " + String(m.projects.count)).foregroundStyle(ink) } icon: {
+                        Image(systemName: "square.fill").foregroundStyle(PageCategory.project.color)
                     }
-                }.padding(.horizontal, 24).padding(.bottom, 24)
-            }.frame(maxWidth:.infinity,alignment:.leading)
+                    Label { Text("Stocks · " + String(m.stocks.count)).foregroundStyle(ink) } icon: {
+                        Image(systemName: "circle.fill").foregroundStyle(PageCategory.stock.color)
+                    }
+                }.font(.callout)
+            }
+            Divider()
+            ProjectGraph(model: m, atlas: true)
         }
     }
 }

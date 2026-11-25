@@ -266,7 +266,7 @@ extension Reader.Bridge {
         guard let path = data?.file, let string = message["src"] as? String, let owner = web.window else { return }
         let request = URL(string:string)
         let asset: URL?
-        if let request, request.scheme == "feynman-image" { asset = try? localImage(request).0 }
+        if let request, request.scheme == "feynman-image" { asset = try? localMedia(request).0 }
         else if let request, ["http","https"].contains(request.scheme?.lowercased() ?? ""), request.host != nil { asset = request }
         else { asset = nil }
         let title = message["title"] as? String ?? ""

@@ -8,8 +8,8 @@
 <key>CFBundleDisplayName</key><string>Feynman</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>Feynman.icns</string>
-<key>CFBundleVersion</key><string>16</string>
-<key>CFBundleShortVersionString</key><string>2.4</string>
+<key>CFBundleVersion</key><string>32</string>
+<key>CFBundleShortVersionString</key><string>2.13.0</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>

@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum PageCategory {
-    case project, report, kind(Kind), webLinks, log, memo, images, documents
+    case stock, project, report, kind(Kind), webLinks, log, memo, images, documents
 
     var graphFilterKey: String {
         switch self {
@@ -28,6 +28,7 @@ enum PageCategory {
         switch self {
         case .images: return "Images"
         case .documents: return "Documents"
+        case .stock: return "Stocks"
         case .project: return "Project"
         case .report: return "Reports"
         case .kind(let kind): return kind.englishLabel
@@ -39,6 +40,7 @@ enum PageCategory {
 
     private var rgb: UInt32 {
         switch self {
+        case .stock: return 0x197A67
         case .project: return 0xD72E78
         case .report: return 0x718615
         case .kind(.questions): return 0xC76509
@@ -60,23 +62,20 @@ enum PageCategory {
     }
 }
 
-extension View {
-    func pageActionColor(_ category: PageCategory) -> some View {
-        tint(category.color).foregroundStyle(category.color)
-    }
-}
-
 struct CategoryTag: View {
     let category: PageCategory
     var compact = false
+    var accent: PageCategory?
 
     var body: some View {
-        Text(compact ? "#" : "# " + category.label)
+        HStack(spacing: 3) {
+            Text("#").foregroundStyle((accent ?? category).color)
+            if !compact { Text(verbatim: category.label).foregroundStyle(accent == nil ? category.color : ink) }
+        }
             .font(.system(size: compact ? 14 : 12, weight: .medium))
-            .foregroundStyle(category.color)
             .padding(.horizontal, compact ? 0 : 6)
             .frame(width: compact ? 18 : nil, height: compact ? 18 : 22)
-            .background(category.color.opacity(0.10), in: RoundedRectangle(cornerRadius: 4))
+            .background((accent ?? category).color.opacity(0.10), in: RoundedRectangle(cornerRadius: 4))
             .accessibilityHidden(compact)
     }
 }
@@ -98,6 +97,10 @@ struct QuestionStatusButton: View {
 struct PageHeading<Content: View>: View {
     let title: String
     let category: PageCategory
+    @Environment(\.activeStockModule) private var stockModule
+    private var accent: PageCategory { stockModule?.category ?? category }
+    var titleSize: CGFloat = 28
+    var showsTag = true
     var metadata: String = ""
     var subtitle: String = ""
     var status: QuestionStatusButton? = nil
@@ -107,7 +110,7 @@ struct PageHeading<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             if let editableTitle { editableTitle }
-            else { Text(title).font(.system(size: 28, weight: .bold))
+            else { Text(title).font(.system(size: titleSize, weight: .bold))
                 .foregroundStyle(ink).textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading) }
@@ -131,19 +134,19 @@ struct PageHeading<Content: View>: View {
         .background {
             ZStack {
                 LinearGradient(colors: [.white, .white, paper], startPoint: .top, endPoint: .bottom)
-                EllipticalGradient(colors: [category.color.opacity(0.15), category.color.opacity(0.05), .clear],
+                EllipticalGradient(colors: [accent.color.opacity(0.15), accent.color.opacity(0.05), .clear],
                                    center: UnitPoint(x: 0.47, y: 0.12), startRadiusFraction: 0, endRadiusFraction: 0.85)
             }
         }
     }
 
     private var actions: some View {
-        content().pageActionColor(category)
+        content().tint(accent.color).foregroundStyle(stockModule == nil ? accent.color : ink)
     }
 
     private var tags: some View {
         HStack(spacing: 8) {
-            CategoryTag(category: category).fixedSize()
+            if showsTag { CategoryTag(category: category, accent: stockModule?.category).fixedSize() }
             status
             if !metadata.isEmpty {
                 Text(metadata).font(.callout).foregroundStyle(.secondary)

@@ -148,58 +148,7 @@ for (const [kind, label] of Object.entries({concepts:'概念', entities:'实体'
 }
 const sourceBlocks = new WeakMap();
 let documentLinks;
-function cleanHTML(markdown) { return sanitize(marked.parse(markdown)); }
-function sanitize(html) {
-  const template = document.createElement('template');
-  template.innerHTML = html;
-  const allowed = new Set('P BR HR H1 H2 H3 H4 H5 H6 UL OL LI STRONG EM B I S DEL CODE PRE BLOCKQUOTE TABLE THEAD TBODY TR TH TD A IMG SUP SUB'.split(' '));
-  for (const el of Array.from(template.content.querySelectorAll('*'))) {
-    if (el.matches('li input[type=checkbox]')) {
-      const box = document.createElement('input');
-      box.type = 'checkbox'; box.checked = el.hasAttribute('checked'); box.disabled = true;
-      el.replaceWith(box);
-      continue;
-    }
-    if (!allowed.has(el.tagName)) { el.replaceWith(document.createTextNode(el.textContent)); continue; }
-    const imageRaw = el.tagName === 'IMG' && (el.getAttribute('data-image-markdown') || el.outerHTML);
-    const href = el.getAttribute('href'), alt = el.getAttribute('alt'), src = el.getAttribute('src');
-    for (const attr of [...el.attributes]) el.removeAttribute(attr.name);
-    if (el.tagName === 'A' && href) el.setAttribute('href', href);
-    if (el.tagName === 'IMG') {
-      imageSources.set(el, imageRaw);
-      if (alt) el.alt = alt;
-      if (src && /^https?:\/\//i.test(src)) el.src = src;
-      else if (src && !/^(?:[a-z][\w+.-]*:|\/)/i.test(src)) {
-        el.src = 'feynman-image://local/?' + new URLSearchParams({file, src});
-      }
-    }
-  }
-  for (const image of template.content.querySelectorAll('img')) {
-    const suffix = image.nextSibling;
-    if (suffix?.nodeType !== Node.TEXT_NODE) continue;
-    const match = /^(?:\{width=([1-9]\d{0,4})\})?(?:\{align=(left|center|right)\})?/.exec(suffix.data);
-    if (!match[0]) continue;
-    suffix.deleteData(0, match[0].length);
-    if (match[1]) image.style.width = match[1] + 'px';
-    if (match[2]) image.dataset.align = match[2];
-  }
-  return template.content;
-}
-function removeDeletedLinks(root,data) {
-  const deadIDs = new Set(data.deletedIDs), deadPaths = new Set(data.deletedPaths);
-  for (const link of root.querySelectorAll('a[href]')) {
-    const href = link.getAttribute('href');
-    let removed = false;
-    if (href.startsWith('feynman:')) removed = deadIDs.has(href.slice(8).split('#', 1)[0]);
-    else if (deadPaths.size && (!/^[a-z][\w+.-]*:/i.test(href) || href.startsWith('project:'))) {
-      try {
-        const target = new URL(href.startsWith('project:') ? '/' + href.slice(8) : href, new URL(data.file, 'https://project.invalid/'));
-        removed = target.origin === 'https://project.invalid' && deadPaths.has(decodeURIComponent(target.pathname.slice(1)));
-      } catch {}
-    }
-    if (removed) link.replaceWith(...link.childNodes);
-  }
-}
+function cleanHTML(markdown) { return sanitize(marked.parse(markdown), file); }
 function renderHistory(turns, expanded, openTurns) {
   const details = document.createElement('details');
   details.className = 'question-history';
@@ -307,7 +256,7 @@ function paint(data, keepScroll = false) {
     // the stable part, then take the editable last line from the note itself.
     const raw = token.type === 'list' ? token.raw.trimEnd() : token.raw;
     const start = data.body.indexOf(raw, cursor);
-    const block = sanitize(marked.Parser.parse([token]));
+    const block = sanitize(marked.Parser.parse([token]), file);
     if (start >= 0) {
       enrichReaderBlock(block, richBlocks.get(start), raw);
       cursor = start + raw.length;

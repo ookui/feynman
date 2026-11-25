@@ -3,4 +3,9 @@
 </style></head><body><main><header><b>项目关系图</b><span class="graph-counts"></span><button data-zoom="out" aria-label="缩小">−</button><span class="graph-scale"></span><button data-zoom="in" aria-label="放大">+</button><button data-zoom="fit">适应窗口</button></header><canvas aria-label="项目关系图，双击节点打开"></canvas><div class="graph-tip" hidden><b></b><small></small></div><div class="graph-message" hidden></div></main>
 <script src="SimaQ/graph-layout.js"></script><script src="SimaQ/graph.js"></script><script>
 const projectGraph=SimaGraph.mount(document.querySelector('main'),{tr:s=>s,open:path=>webkit.messageHandlers.graph.postMessage(path)});
+function updateGraph(data,atlas) {
+  document.querySelector('header b').textContent=atlas?'专题与个股':'项目关系图';
+  document.querySelector('canvas').setAttribute('aria-label',atlas?'Atlas 专题与个股关系图，双击节点打开':'项目关系图，双击节点打开');
+  projectGraph.update(data);
+}
 </script></body></html>
