@@ -619,7 +619,7 @@ async function pasteIntoBlock(edit, fallback, html) {
   const raw = edit.raw, rect = edit.grid?.getSelection();
   try {
     const result = await window.webkit.messageHandlers.notePaste.postMessage({
-      id:state.editID, selection:field ? before.slice(start,end) : '', html:html ?? '', grid:!!edit.grid
+      id:state.editID, selection:field ? before.slice(start,end) : '', html:html ?? '', plain:fallback, grid:!!edit.grid
     });
     if (activeBlock !== edit || edit.field !== field || document.activeElement !== focus ||
         field?.value !== before || field?.selectionStart !== start || field?.selectionEnd !== end) return;

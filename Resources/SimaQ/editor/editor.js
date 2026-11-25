@@ -1512,12 +1512,14 @@
       return files.filter(file => file.type.startsWith('image/') ||
         /\.(?:png|apng|jpe?g|jfif|jp2|jxl|gif|webp|avif|hei[cf]|tiff?|bmp|ico|svg)$/i.test(file.name));
     }
-    async function insertImages(files, a, b, preview, separateParagraph = false) {
+    async function insertImages(files, a, b, {preview, separateParagraph, readOriginals} = {}) {
       const anchor = {a,b}, links = [];
       pendingAssets.add(anchor);
       let failure;
       try {
-        for (const file of files) {
+        const originals = await readOriginals?.();
+        if (originals) links.push(originals);
+        else for (const file of files) {
           if (destroyed) break;
           const path = await options.onAsset(file);
           const label = (file.name || '截图').replace(/[\r\n]+/g,' ').replace(/[\\\[\]]/g,'\\$&');
@@ -1598,7 +1600,7 @@
       e.preventDefault();
       e.stopPropagation();
       const at = imageDropPoint(e);
-      void insertImages(files,at,at,true,!!e.target.closest('.sima-end-entry'));
+      void insertImages(files,at,at,{preview:true, separateParagraph:!!e.target.closest('.sima-end-entry')});
     },{capture:true});
     on(viewport,'paste',e=>{
       if (composing || e.defaultPrevented || e.target === imageCaption || !options.onAsset) return;
@@ -1606,7 +1608,7 @@
       if (!files.length) return;
       e.preventDefault();
       readSelection();
-      void insertImages(files,...range(),false);
+      void insertImages(files,...range(),{readOriginals:e.isTrusted ? options.onPasteImages : null});
     },{capture:true});
     // Keep native character/word selection within a field. Across blocks WebKit
     // gives the textarea and the article separate selections, so track the two

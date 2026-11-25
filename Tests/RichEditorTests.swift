@@ -3,7 +3,93 @@ import SwiftUI
 import WebKit
 
 @main struct RichEditorTests {
+    static func checkSVGClipboard() throws {
+        let folder = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: folder) }
+        let bytes = Data(#"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="30"><circle r="8"/></svg>"#.utf8)
+        let source = folder.appendingPathComponent("价值 链.SVG")
+        try bytes.write(to: source)
+        let file = NSPasteboardItem(), vector = NSPasteboardItem(), text = NSPasteboardItem()
+        file.setString(source.absoluteString, forType: .fileURL)
+        file.setString("预览", forType: .html)
+        vector.setData(Data([0]), forType: .tiff)
+        vector.setData(bytes, forType: NotePaste.svgType)
+        text.setString(source.path, forType: .string)
+        let note = folder.appendingPathComponent("note.md")
+        let result = try NotePaste.originalImages(from: [file, vector, text], beside: note) ?? ""
+        let links = result.components(separatedBy: "\n")
+        guard links.count == 2, links[0].hasPrefix("![价值 链.SVG](assets/"),
+              links[1].hasPrefix("![图片.svg](assets/") else { throw Failure("SVG 文件或矢量剪贴板识别失败") }
+        try fm.removeItem(at: source)
+        for link in links {
+            guard let start = link.range(of: "](assets/"), link.hasSuffix(".svg)"),
+                  try Data(contentsOf: folder.appendingPathComponent("assets/" + link[start.upperBound...].dropLast())) == bytes
+            else { throw Failure("保存后的 SVG 与原文件不一致") }
+        }
+        let path = try NotePaste.storeImageFile(bytes, name: "image", note: note, mime: "image/svg+xml")
+        guard path.hasSuffix(".svg"), try Data(contentsOf: folder.appendingPathComponent(path)) == bytes
+        else { throw Failure("无扩展名的 SVG 导入失败") }
+        print("PASS SVG 文件粘贴、矢量优先、纯文本路径、无扩展名 SVG 与原始字节回读")
+    }
+
+    static func checkWebClipboard() throws {
+        let folder = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: folder) }
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let note = folder.appendingPathComponent("note.md")
+        let svg = #"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 120"><defs><linearGradient id="fill"/></defs><text x="4" y="20">Tempus 与 Natera</text></svg>"#
+        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aV0AAAAASUVORK5CYII=")!
+        func pasted(_ item: NSPasteboardItem, ext: String) throws -> (String, Data) {
+            board.clearContents()
+            guard board.writeObjects([item]) else { throw Failure("无法写入测试专用剪贴板") }
+            let markdown = try NotePaste.markdown(from: board, beside: note) ?? ""
+            guard let match = markdown.range(of: #"assets/[0-9a-f-]+\.[a-z]+"#, options: .regularExpression) else {
+                throw Failure("网页图片未保存为附件：" + String(markdown.prefix(180)))
+            }
+            let url = folder.appendingPathComponent(String(markdown[match]))
+            guard url.pathExtension == ext else { throw Failure("附件格式错误：" + url.pathExtension) }
+            return (markdown, try Data(contentsOf: url))
+        }
+        let inline = NSPasteboardItem()
+        inline.setString("<meta charset='utf-8'><div>图前" + svg + "图后</div>", forType: .html)
+        let (caption, bytes) = try pasted(inline, ext: "svg")
+        let xml = try XMLDocument(data: bytes, options: [.nodeLoadExternalEntitiesNever])
+        guard caption.contains("图前"), caption.contains("图后"), xml.rootElement()?.uri == "http://www.w3.org/2000/svg",
+              xml.rootElement()?.attribute(forName: "viewBox")?.stringValue == "0 0 240 120",
+              try xml.nodes(forXPath: "//*[local-name()='linearGradient']").count == 1 else {
+            throw Failure("内嵌 SVG 几何、渐变或图注缺失")
+        }
+        let text = NSPasteboardItem()
+        text.setString(svg, forType: .string)
+        guard try pasted(text, ext: "svg").1 == Data(svg.utf8) else { throw Failure("SVG 文本内容改变") }
+        let uri = NSPasteboardItem()
+        uri.setString("<img src='data:image/svg+xml;charset=utf-8," +
+            svg.addingPercentEncoding(withAllowedCharacters: .alphanumerics)! + "'>", forType: .html)
+        guard try pasted(uri, ext: "svg").1 == Data(svg.utf8) else { throw Failure("编码 SVG 导入失败") }
+        let preview = "<p>竞争格局</p><a href='blob:https://chatgpt.com/preview'><img alt='对照图' src='blob:https://chatgpt.com/preview'></a>"
+        let image = NSPasteboardItem()
+        image.setString(preview, forType: .html)
+        image.setData(png, forType: .png)
+        let (body, stored) = try pasted(image, ext: "png")
+        guard body.contains("竞争格局"), body.contains("![对照图]"), !body.contains("blob:"), stored == png else {
+            throw Failure("带临时网址的网页预览丢失图片或图注")
+        }
+        let archive = NSPasteboardItem()
+        archive.setPropertyList(["WebMainResource": ["WebResourceData": Data(preview.utf8), "WebResourceMIMEType": "text/html"],
+            "WebSubresources": [["WebResourceURL": "blob:https://chatgpt.com/preview", "WebResourceMIMEType": "image/png",
+                                 "WebResourceData": png]]], forType: .init("com.apple.webarchive"))
+        guard try pasted(archive, ext: "png").1 == png else { throw Failure("网页归档中的原图未导入") }
+        print("PASS 网页内嵌 SVG、SVG 源码、百分号编码、PNG 预览与归档附件回读")
+    }
+
     @MainActor static func main() async throws {
+        try checkSVGClipboard()
+        if CommandLine.arguments.contains("--svg-clipboard") { return }
+        try checkWebClipboard()
+        if CommandLine.arguments.contains("--web-clipboard") { return }
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -39,6 +125,40 @@ import WebKit
         try await wait("document.querySelector('.sima-tex svg') != null")
         try await run("article.querySelector('li').click()")
         try await wait("typeof editor !== 'undefined' && !!document.querySelector('.sima-block-input')")
+        if CommandLine.arguments.contains("--web-paste-window") {
+            guard let web = model.readerWeb, let bridge = web.navigationDelegate as? Reader.Bridge else { throw Failure("缺少编辑器") }
+            let board = NSPasteboard.withUniqueName()
+            defer { board.releaseGlobally() }
+            bridge.pasteboard = board
+            board.setString("<div><svg xmlns='http://www.w3.org/2000/svg' width='128' height='64'><rect width='128' height='64' fill='blue'/></svg></div>", forType: .html)
+            func commandV() {
+                let key = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                    characters: "v", charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9)!
+                web.keyDown(with: key)
+            }
+            try await run("editor.locate(0)")
+            commandV()
+            try await wait("editor.getText().startsWith('![图片](assets/') && editor.getText().includes('.svg)')")
+            if let input = ProcessInfo.processInfo.environment["FEYNMAN_TEST_PNG"] {
+                let png = try Data(contentsOf: URL(fileURLWithPath: input))
+                let item = NSPasteboardItem()
+                item.setString("<p>图注</p><img alt='肿瘤检测' src='blob:https://chatgpt.com/preview'>", forType: .html)
+                item.setData(png, forType: .png)
+                board.clearContents()
+                guard board.writeObjects([item]) else { throw Failure("测试图片未复制") }
+                try await run("editor.locate(editor.getText().length)")
+                commandV()
+                try await wait("editor.getText().includes('![肿瘤检测](assets/') && editor.getText().includes('.png)')")
+            }
+            guard model.finishInlineNote() else { throw Failure("图片粘贴后保存失败") }
+            try await wait("typeof article !== 'undefined' && article.querySelector('img[src*=svg]')?.naturalWidth === 128")
+            if ProcessInfo.processInfo.environment["FEYNMAN_TEST_PNG"] != nil {
+                try await wait("article.querySelector('img[src*=png]')?.naturalWidth > 0")
+            }
+            print("PASS 原生 WebKit 正文 ⌘V、保存及重新渲染")
+            return
+        }
         try await run("""
           window.key = (name, extra={}) => document.activeElement.dispatchEvent(
             new KeyboardEvent('keydown', {key:name, bubbles:true, cancelable:true, ...extra}));

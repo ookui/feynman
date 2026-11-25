@@ -21,5 +21,5 @@ async function importImage(file, path) {
   const encoded = await new Promise((resolve,reject)=>{
     const r=new FileReader();r.onerror=()=>reject(r.error);r.onload=()=>resolve(r.result.split(',')[1]);r.readAsDataURL(file);
   });
-  return webkit.messageHandlers.imageImport.postMessage({file:path,name:file.name,data:encoded});
+  return webkit.messageHandlers.imageImport.postMessage({file:path,name:file.name,mime:file.type,data:encoded});
 }

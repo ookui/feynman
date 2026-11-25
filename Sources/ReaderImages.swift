@@ -367,6 +367,16 @@ extension Reader.Bridge {
             Task { @MainActor in
                 do {
                     let bytes = try await ReaderImageAsset.bytes(asset)
+                    if asset.pathExtension.lowercased() == "svg" {
+                        let item = NSPasteboardItem()
+                        item.setData(bytes, forType: NotePaste.svgType)
+                        if let preview = NSImage(data: bytes)?.tiffRepresentation {
+                            item.setData(preview, forType: .tiff)
+                        }
+                        self.pasteboard.clearContents()
+                        if !self.pasteboard.writeObjects([item]) { throw Failure("无法复制图片。") }
+                        return
+                    }
                     guard let img = NSImage(data:bytes) else { throw Failure("无法读取图片。") }
                     self.pasteboard.clearContents()
                     if !self.pasteboard.writeObjects([img]) { throw Failure("无法复制图片。") }

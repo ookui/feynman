@@ -129,7 +129,7 @@ struct Reader: NSViewRepresentable {
                     replyHandler(nil, "无法导入图片。"); return
                 }
                 do {
-                    let path = try NotePaste.storeImageFile(bytes, name: name, note: model.documentURL(file))
+                    let path = try NotePaste.storeImageFile(bytes, name: name, note: model.documentURL(file), mime: m["mime"] as? String)
                     replyHandler(["path":path, "markdown":NotePaste.imageMarkdown(name, path)], nil)
                 } catch { replyHandler(nil, error.localizedDescription) }
                 return
@@ -150,7 +150,7 @@ struct Reader: NSViewRepresentable {
                     if pasteboard.writeObjects([item]) { replyHandler(true,nil) }
                     else { replyHandler(nil, "无法写入剪贴板。") }
                 } else if m["action"] as? String == "paste" {
-                    do { replyHandler(try NotePaste.markdown(from: pasteboard, beside: model.documentURL(path), htmlFallback: m["html"] as? String), nil) }
+                    do { replyHandler(try NotePaste.markdown(from: pasteboard, beside: model.documentURL(path), htmlFallback: m["html"] as? String, plainFallback: m["plain"] as? String), nil) }
                     catch { replyHandler(nil,error.localizedDescription) }
                 } else { replyHandler(nil, "无法读取选区操作。") }
                 return
@@ -177,7 +177,12 @@ struct Reader: NSViewRepresentable {
             if m["grid"] as? Bool == true, let cells = pasteboard.string(forType: NotePaste.tableCells) {
                 replyHandler(["cells": cells], nil); return
             }
-            do { replyHandler(try NotePaste.markdown(from: pasteboard, beside: note.url, selection: m["selection"] as? String ?? "", htmlFallback: m["html"] as? String), nil) }
+            if m["imageOriginals"] as? Bool == true {
+                do { replyHandler(try NotePaste.originalImages(from: pasteboard.pasteboardItems ?? [], beside: note.url), nil) }
+                catch { replyHandler(nil, error.localizedDescription) }
+                return
+            }
+            do { replyHandler(try NotePaste.markdown(from: pasteboard, beside: note.url, selection: m["selection"] as? String ?? "", htmlFallback: m["html"] as? String, plainFallback: m["plain"] as? String), nil) }
             catch { replyHandler(nil, error.localizedDescription) }
         }
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {

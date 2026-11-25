@@ -18,6 +18,7 @@ function render(data) {
   editor?.destroy(); session=data;lastBody=data.body;
   editor=SimaEditor.create(host,{text:data.body,path:data.file,
     writeTableClipboard:(text,whole)=>webkit.messageHandlers.tableCopy.postMessage({id:data.editID,text,whole}),
+    onPasteImages:()=>webkit.messageHandlers.notePaste.postMessage({id:data.editID, imageOriginals:true}),
     onAsset:async file=>(await importImage(file,data.file)).path,
     onError:message=>send({action:'error',message}),
     onLink:href=>send({action:'link',href}),
@@ -43,8 +44,8 @@ function render(data) {
   }
 }
 // The system pasteboard carries HTML tables, rich links and native screenshots.
-host.addEventListener('paste', async event => {
-  if (!event.isTrusted || event.defaultPrevented || event.target.closest('dialog,.sima-table-block,.sima-image-caption')) return;
+async function pasteNote(event) {
+  if (!event.isTrusted || event.defaultPrevented || event.target.closest('dialog,.sima-table-block,.sima-image-caption,.sima-composing')) return;
   event.preventDefault();
   const active = editor, original = active.getText(), id = session.editID;
   const {anchor, head} = active.getState().selection;
@@ -52,7 +53,7 @@ host.addEventListener('paste', async event => {
   const plain = event.clipboardData?.getData('text/plain') || '';
   const html = event.clipboardData?.getData('text/html') || '';
   try {
-    const value = await webkit.messageHandlers.notePaste.postMessage({id, selection:original.slice(start,end), html});
+    const value = await webkit.messageHandlers.notePaste.postMessage({id, selection:original.slice(start,end), html, plain});
     if (active !== editor || active.getText() !== original || session.editID !== id) return;
     const current = active.getState().selection;
     if (current.anchor !== anchor || current.head !== head) return;
@@ -64,6 +65,12 @@ host.addEventListener('paste', async event => {
     }
     active.action('insertText', text);
   } catch (err) { if (active === editor) send({action:'error', message:err.message}); }
+}
+host.addEventListener('paste', pasteNote);
+// A file-only pasteboard may not produce a WebKit paste event in a textarea.
+host.addEventListener('keydown', event => {
+  if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.isComposing &&
+      event.key.toLowerCase() === 'v' && event.target.matches('textarea')) pasteNote(event);
 });
 function performEditorCommand(id) {
   if(id==='open')return;

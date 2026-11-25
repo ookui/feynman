@@ -169,7 +169,7 @@ async function rangeClipboard(event,action,range) {
   const body=state.body, path=file, saved=range.cloneRange();
   try {
     const result=await window.webkit.messageHandlers.selectionClipboard.postMessage({
-      file,body,action,text:step.clipboard ?? '',html:event.clipboardData?.getData('text/html') ?? ''
+      file,body,action,text:step.clipboard ?? '',plain:event.clipboardData?.getData('text/plain'),html:event.clipboardData?.getData('text/html') ?? ''
     });
     const current=selectedNoteRange();
     if (path!==file || body!==state.body || !current ||

@@ -35,6 +35,7 @@ enum NotePaste {
     static let noteMarkdown = NSPasteboard.PasteboardType("app.feynman.markdown-selection")
     static let tableMarkdown = NSPasteboard.PasteboardType("app.feynman.markdown-table")
     static let tableCells = NSPasteboard.PasteboardType("app.feynman.table-cells")
+    static let svgType = NSPasteboard.PasteboardType(UTType.svg.identifier)
     private static let tableDivider = #"^ *\|? *:?-+:? *(?:\| *:?-+:? *)*\|? *$"#
 
     static func isTableBlock(_ block: String?) -> Bool {
@@ -43,21 +44,99 @@ enum NotePaste {
         return lines.count >= 2 && lines[1].range(of: tableDivider, options: .regularExpression) != nil
     }
 
-    static func markdown(from board: NSPasteboard, beside note: URL, selection: String = "", htmlFallback: String? = nil) throws -> String? {
+    static func originalImages(from items: [NSPasteboardItem], beside note: URL) throws -> String? {
+        // Finder can advertise both the file and a preview on the same item.
+        let images = try items.compactMap { item -> String? in
+            if let value = item.string(forType: .fileURL) ?? item.string(forType: .URL),
+               let file = URL(string: value), file.isFileURL,
+               file.pathExtension.lowercased() == "svg" || UTType(filenameExtension: file.pathExtension)?.conforms(to: .image) == true {
+                return try storeImage(Data(contentsOf: file), name: file.lastPathComponent, note: note)
+            }
+            for type in [svgType, .init("image/svg+xml")] where item.types.contains(type) {
+                if let bytes = item.data(forType: type) { return try storeImage(bytes, name: "图片.svg", note: note) }
+            }
+            return nil
+        }
+        return images.isEmpty ? nil : images.joined(separator: "\n")
+    }
+
+    private struct WebImage {
+        let data: Data
+        let mime: String
+
+        init?(dataURL: String) {
+            guard dataURL.lowercased().hasPrefix("data:image/"), let comma = dataURL.firstIndex(of: ",") else { return nil }
+            let fields = dataURL[..<comma].dropFirst(5).lowercased().split(separator: ";")
+            guard let type = fields.first else { return nil }
+            mime = String(type)
+            let payload = dataURL[dataURL.index(after: comma)...]
+            if fields.contains("base64"), let decoded = Data(base64Encoded: String(payload), options: .ignoreUnknownCharacters) {
+                data = decoded
+            } else if mime == "image/svg+xml", !fields.contains("base64"), let xml = payload.removingPercentEncoding {
+                data = Data(xml.utf8)
+            } else { return nil }
+        }
+
+        init?(resource: [String: Any]) {
+            guard let type = resource["WebResourceMIMEType"] as? String, type.lowercased().hasPrefix("image/"),
+                  let bytes = resource["WebResourceData"] as? Data else { return nil }
+            mime = type
+            data = bytes
+        }
+    }
+
+    private static func svgBytes(_ element: XMLElement) -> Data {
+        let root = element.copy() as! XMLElement
+        if root.namespace(forPrefix: "") == nil {
+            root.addNamespace(XMLNode.namespace(withName: "", stringValue: "http://www.w3.org/2000/svg") as! XMLNode)
+        }
+        return Data(root.xmlString.utf8)
+    }
+
+    private static func webArchiveMarkdown(_ board: NSPasteboard, note: URL) throws -> String? {
+        for type in ["com.apple.webarchive", "Apple Web Archive pasteboard type"] {
+            guard let archive = board.propertyList(forType: .init(type)) as? [String: Any],
+                  let main = archive["WebMainResource"] as? [String: Any] else { continue }
+            if let image = WebImage(resource: main) {
+                return try storeImage(image.data, name: "图片", note: note, mime: image.mime)
+            }
+            guard let data = main["WebResourceData"] as? Data, let html = String(data: data, encoding: .utf8),
+                  let resources = archive["WebSubresources"] as? [[String: Any]] else { continue }
+            var images: [String: WebImage] = [:]
+            for resource in resources {
+                if let url = resource["WebResourceURL"] as? String, let image = WebImage(resource: resource) {
+                    images[url] = image
+                }
+            }
+            if !images.isEmpty {
+                let base = (main["WebResourceURL"] as? String).flatMap { URL(string: $0) }
+                if let value = try htmlMarkdown(html, beside: note, archivedImages: images, baseURL: base) { return value }
+            }
+        }
+        return nil
+    }
+
+    static func markdown(from board: NSPasteboard, beside note: URL, selection: String = "", htmlFallback: String? = nil, plainFallback: String? = nil) throws -> String? {
         if let text = board.string(forType: noteMarkdown) { return text }
         if let table = board.string(forType: tableMarkdown) { return table }
-        let plain = board.string(forType: .string)
-        if let html = board.string(forType: .html) ?? htmlFallback, !html.isEmpty {
-            let hasBitmap = board.types?.contains { UTType($0.rawValue)?.conforms(to: .image) == true } == true
-            if let value = try htmlMarkdown(html, beside: note, plain: plain, selection: selection, hasBitmap: hasBitmap) { return value }
+        if let images = try originalImages(from: board.pasteboardItems ?? [], beside: note) { return images }
+        if let archived = try webArchiveMarkdown(board, note: note) { return archived }
+        let plain = board.string(forType: .string) ?? plainFallback
+        if let value = plain?.clean {
+            if let image = WebImage(dataURL: value) { return try storeImage(image.data, name: "图片", note: note, mime: image.mime) }
+            if value.hasPrefix("<svg") || value.hasPrefix("<?xml"),
+               let root = (try? XMLDocument(xmlString: value, options: [.nodeLoadExternalEntitiesNever]))?.rootElement(),
+               root.localName == "svg" {
+                let bytes = root.namespace(forPrefix: "") == nil ? svgBytes(root) : Data(value.utf8)
+                return try storeImage(bytes, name: "图片.svg", note: note)
+            }
         }
-        let files = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
-        let images = files.filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
-        if !images.isEmpty {
-            return try images.map { try storeImage(Data(contentsOf: $0), name: $0.lastPathComponent, note: note) }.joined(separator: "\n")
+        if let html = board.string(forType: .html) ?? htmlFallback, !html.isEmpty {
+            let bitmapType = board.types?.first(where: isImageType)
+            if let value = try htmlMarkdown(html, beside: note, plain: plain, selection: selection, bitmap: { bitmapType.flatMap { board.data(forType: $0) } }) { return value }
         }
         for type in board.types ?? [] {
-            if UTType(type.rawValue)?.conforms(to: .image) == true, let data = board.data(forType: type) {
+            if isImageType(type), let data = board.data(forType: type) {
                 return try storeImage(data, name: "图片", note: note)
             }
         }
@@ -96,22 +175,53 @@ enum NotePaste {
         return plain.map { tabularText($0) ?? plainMarkdown($0, selection: selection) }
     }
 
+    private static func isImageType(_ type: NSPasteboard.PasteboardType) -> Bool {
+        type == .png || type == .tiff || type.rawValue.hasPrefix("image/") || UTType(type.rawValue)?.conforms(to: .image) == true
+    }
+
     private static func htmlMarkdown(_ html: String, beside note: URL, plain: String? = nil,
-                                     selection: String = "", hasBitmap: Bool = false) throws -> String? {
-        guard let document = try? XMLDocument(xmlString: html, options: [.documentTidyHTML, .nodeLoadExternalEntitiesNever]),
+                                     selection: String = "", bitmap: () -> Data? = { nil },
+                                     archivedImages: [String: WebImage] = [:], baseURL: URL? = nil) throws -> String? {
+        // HTML Tidy drops inline SVG. Preserve its case-sensitive geometry and paint definitions
+        // before converting the surrounding HTML to Markdown.
+        var markup = html
+        if html.contains("<svg"), let fragment = try? XMLDocument(xmlString: "<div>" + html + "</div>",
+                options: [.documentTidyXML, .nodeLoadExternalEntitiesNever]),
+           let elements = try? fragment.nodes(forXPath: "//*[local-name()='svg' and not(ancestor::*[local-name()='svg'])]") {
+            for case let svg as XMLElement in elements {
+                guard let parent = svg.parent as? XMLElement else { continue }
+                let img = XMLElement(name: "img")
+                img.setAttributesWith(["alt": svg.attribute(forName: "aria-label")?.stringValue ?? "图片",
+                                       "src": "data:image/svg+xml;base64," + svgBytes(svg).base64EncodedString()])
+                parent.replaceChild(at: svg.index, with: img)
+            }
+            if !elements.isEmpty { markup = fragment.rootElement()?.xmlString ?? html }
+        }
+        guard let document = try? XMLDocument(xmlString: markup, options: [.documentTidyHTML, .nodeLoadExternalEntitiesNever]),
               let root = document.rootElement() else { return nil }
         // XPath on a detached XMLNode silently loses its document context.
         return try withExtendedLifetime(document) {
             let body = (try? root.nodes(forXPath: "//body").first) ?? root
-            if hasBitmap, (body.stringValue ?? "").clean.isEmpty, (try? body.nodes(forXPath: ".//img").count) == 1 { return nil }
+            let base = (try? root.nodes(forXPath: "//base/@href").first?.stringValue).flatMap { URL(string: $0) } ?? baseURL
+            let images = (try? body.nodes(forXPath: ".//img")) as? [XMLElement] ?? []
+            for img in images {
+                guard let src = img.attribute(forName: "src"), let url = src.stringValue,
+                      let image = archivedImages[url] ?? archivedImages[URL(string: url, relativeTo: base)?.absoluteString ?? url] else { continue }
+                src.stringValue = "data:" + image.mime + ";base64," + image.data.base64EncodedString()
+            }
+            if images.count == 1, let src = images[0].attribute(forName: "src"),
+               src.stringValue?.lowercased().hasPrefix("data:image/") != true, let data = bitmap() {
+                // Clipboards can carry a bitmap alongside a private preview URL and a caption.
+                // ImageIO identifies the actual format from the bytes.
+                src.stringValue = "data:image/unknown;base64," + data.base64EncodedString()
+            }
             // Some copy buttons wrap plain Markdown or tabular text in a rich-text span.
-            if let plain, (try? body.nodes(forXPath: "descendant-or-self::table | descendant-or-self::pre | descendant-or-self::code | descendant-or-self::ul | descendant-or-self::ol").isEmpty) == true {
+            if images.isEmpty, let plain, (try? body.nodes(forXPath: "descendant-or-self::table | descendant-or-self::pre | descendant-or-self::code | descendant-or-self::ul | descendant-or-self::ol").isEmpty) == true {
                 if let table = tabularText(plain) { return table }
                 if plain.components(separatedBy: "\n\n").contains(where: { isTableBlock($0) }) {
                     return plainMarkdown(plain, selection: selection)
                 }
             }
-            let base = (try? root.nodes(forXPath: "//base/@href").first?.stringValue).flatMap { URL(string: $0) }
             let value = try convert(body, base: base, note: note).clean
             return value.isEmpty ? nil : value
         }
@@ -266,9 +376,8 @@ enum NotePaste {
         case "img":
             let alt = attribute("alt") ?? "图片"
             guard let src = attribute("src") else { return "" }
-            if src.hasPrefix("data:image/"), let comma = src.firstIndex(of: ","), src[..<comma].hasSuffix(";base64"),
-               let bytes = Data(base64Encoded: String(src[src.index(after: comma)...]), options: .ignoreUnknownCharacters) {
-                return try storeImage(bytes, name: alt, note: note)
+            if let image = WebImage(dataURL: src) {
+                return try storeImage(image.data, name: alt, note: note, mime: image.mime)
             }
             let url = resolved(src)
             return MaterialLinks.isWeb(url) ? "!" + link(alt, url) : ""
@@ -279,7 +388,10 @@ enum NotePaste {
         case "a":
             guard let href = attribute("href"), !href.isEmpty else { return inner }
             let target = resolved(href)
-            if inner.hasPrefix("![") { return "[" + inner + "](" + destination(target) + ")" }
+            if inner.hasPrefix("![") {
+                if ["blob", "data", "sandbox"].contains(URL(string: target)?.scheme?.lowercased() ?? "") { return inner }
+                return "[" + inner + "](" + destination(target) + ")"
+            }
             let title = (el.stringValue ?? "").clean
             return link(title.isEmpty ? target : title, target)
         case "b", "strong": return "**" + inner + "**"
@@ -293,16 +405,16 @@ enum NotePaste {
         }
     }
 
-    static func storeImage(_ data: Data, name: String, note: URL) throws -> String {
-        imageMarkdown(name, try storeImageFile(data, name: name, note: note))
+    static func storeImage(_ data: Data, name: String, note: URL, mime: String? = nil) throws -> String {
+        imageMarkdown(name, try storeImageFile(data, name: name, note: note, mime: mime))
     }
 
-    static func storeImageFile(_ data: Data, name: String, note: URL) throws -> String {
+    static func storeImageFile(_ data: Data, name: String, note: URL, mime: String? = nil) throws -> String {
         let folder = try Files.child(note.deletingLastPathComponent(), "assets")
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-        if (name as NSString).pathExtension.lowercased() == "svg",
-           let xml = try? XMLDocument(data: data, options: [.nodeLoadExternalEntitiesNever]),
-           xml.rootElement()?.localName == "svg" {
+        if (name as NSString).pathExtension.lowercased() == "svg" || mime?.lowercased() == "image/svg+xml" {
+            guard let xml = try? XMLDocument(data: data, options: [.nodeLoadExternalEntitiesNever]),
+                  xml.rootElement()?.localName == "svg" else { throw Failure("无法读取 SVG 图片。") }
             let filename = UUID().uuidString.lowercased() + ".svg"
             try data.write(to: Files.child(folder, filename), options: .withoutOverwriting)
             return "assets/" + filename
