@@ -264,10 +264,6 @@ extension Files {
                 changes.update(try ownedFile(context, "research.json"), from: raw, to: try json(book))
             }
             if let draft = book.draft { notes.append(draft.path) }
-            notes += StockModule.allCases.compactMap(\.note)
-            notes += try StockNotes.segments(in: context).flatMap { [$0.business, $0.competition] }
-            let reports = try child(context.url, "reports")
-            if fm.fileExists(atPath: reports.path) { notes += try list(reports).filter { $0.pathExtension.lowercased() == "md" }.map { "reports/" + $0.lastPathComponent } }
         }
         // Markdown attachments and company reports can themselves cite another source.
         var folders = ["references/files"]

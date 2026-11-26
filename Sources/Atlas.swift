@@ -82,6 +82,7 @@ struct StockChooser: View {
     @State private var query = ""
     @State private var name: String
     @State private var ticker = ""
+    @State private var intent = ""
     @State private var creating: Bool
     @State private var message = ""
 
@@ -115,7 +116,7 @@ struct StockChooser: View {
     private func create() {
         guard let root = m.root, m.finishInlineNote() else { return }
         do {
-            let company = try Files.createStock(root, name: name, ticker: ticker, link: link)
+            let company = try Files.createStock(root, name: name, ticker: ticker, link: link, intent: intent)
             m.refreshProjects()
             dismiss()
             m.open(company, at: .overview)
@@ -128,6 +129,7 @@ struct StockChooser: View {
             if creating {
                 TextField("公司名称", text: $name)
                 TextField("股票代码（选填）", text: $ticker)
+                TextField("为什么现在看（选填）：事件、价格，或专题里出现的线索", text: $intent, axis: .vertical).lineLimit(2...4)
             } else {
                 TextField("搜索公司名称或股票代码", text: $query)
                     .accessibilityIdentifier("stockChooser.search")

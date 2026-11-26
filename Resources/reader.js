@@ -142,6 +142,7 @@ function tell(message) {
 for (const [kind, label] of Object.entries({concepts:'概念', entities:'实体', events:'事件', questions:'问题'})) {
   const button = document.createElement('button');
   button.textContent = label;
+  button.dataset.kind = kind;
   button.onmousedown = e => e.preventDefault();
   button.onclick = () => { if (draft) send({action:'extract',kind,anchor:draft}); bar.hidden = true; };
   bar.append(button);
@@ -364,6 +365,7 @@ document.addEventListener('selectionchange', () => {
   const range=selection.getRangeAt(0);
   draft=makeDraft(positionForRange(range),'selection');
   if (!draft) { bar.hidden=true; return; }
+  for (const button of bar.querySelectorAll('button')) button.hidden = Array.isArray(state.kinds) && !state.kinds.includes(button.dataset.kind);
   bar.hidden=false;
   const rect=range.getBoundingClientRect(),box=bar.getBoundingClientRect();
   bar.style.left=Math.max(4,Math.min(rect.left,innerWidth-box.width-5))+'px';

@@ -5,29 +5,9 @@ import AppKit
         if try !value() { throw Failure(message) }
     }
 
-    static func legacySegment(_ title: String, business: String, competition: String? = nil, in company: ProjectAt) throws -> BusinessSegment {
-        let segment = BusinessSegment(directory: StockNotes.segmentDirectory + "/" + UUID().uuidString.lowercased(), title: title)
-        try fm.createDirectory(at: Files.child(company.url, segment.directory), withIntermediateDirectories: true)
-        try Files.save(Files.child(company.url, segment.directory + "/name.txt"), title, expected: nil)
-        try Files.save(Files.child(company.url, segment.business), business, expected: nil)
-        if let competition { try Files.save(Files.child(company.url, segment.competition), competition, expected: nil) }
-        return segment
-    }
-
     @MainActor static func verifyModules(_ m: Workspace, company: ProjectAt, other: ProjectAt, topic: ProjectAt, link: StockLink) throws {
         let directoryNames = try Files.list(company.url).map(\.lastPathComponent)
-        try check(Set(directoryNames) == ["project.json", "analysis", "documents", "versions", "references"], "新个股只配置个股所用目录")
-        let legacyTemplate = "## 业务流程\n\n## 收入来源\n\n## 增长驱动\n"
-        let unused = try legacySegment("旧版空模板", business: legacyTemplate,
-            competition: "## 主要竞争对手\n\n## 产品与市场份额\n\n## 竞争优势与风险\n", in: company)
-        let userBody = "已填写的增长假设\n\n![图](<配图 A.svg>)\n\n[报告](../../../documents/q1.pdf) [外部](https://example.com)\n\n`[示例](example.md)`"
-        let competitionNote = "同行比较及市场份额"
-        let edited = try legacySegment("数据\n授权\n数据授权（Insights）", business: userBody, competition: competitionNote, in: company)
-        let otherSegment = try legacySegment("检测", business: "检测收入", in: company)
-        let order = [otherSegment, edited, unused].map { String($0.directory.split(separator: "/").last!) }
-        try Files.save(Files.child(company.url, StockNotes.segmentDirectory + "/order.json"), json(order), expected: nil)
-        let path = StockModule.business.note!
-        try Files.save(Files.child(company.url, path), "---\ntitle: 业务\n---\n原有概览", expected: nil)
+        try check(Set(directoryNames) == ["project.json", "questions", "events", "references", "reports", "documents", "versions"], "新个股只配置个股所用目录")
         let oldMemo = try Files.child(company.url, "memo.md")
         try Files.save(oldMemo, "旧笔记", expected: nil)
         let legacyDir = try Files.child(company.url, "concepts")
@@ -36,81 +16,36 @@ import AppKit
         try Files.save(Files.child(company.url, legacyEntry.path), legacyEntry.encoded(), expected: nil)
         m.open(other, at: .overview)
         m.open(m.stocks.first { $0.id == company.id } ?? company, at: .overview)
-        let merged = Document(try m.text(path) ?? "")
-        let headings = merged.body.components(separatedBy: "\n").filter { $0.hasPrefix("## ") }
-        try check(headings == ["## 检测", "## 数据授权（Insights）", "## 旧版空模板"] && merged.fields["title"] == "业务", "业务顺序及原有元数据")
-        let prefix = String(edited.directory.dropFirst("analysis/".count)) + "/"
-        try check(merged.body.hasPrefix("原有概览") && merged.body.contains(competitionNote) && merged.body.contains("<" + prefix + "配图 A.svg>") && merged.body.contains(prefix + "../../../documents/q1.pdf"), "概览、图片、报告和竞争分析在同一篇正文")
-        try check(merged.body.contains("[外部](https://example.com)") && merged.body.contains("`[示例](example.md)`") && !merged.body.contains("## 主要竞争对手"), "区分相对链接、外部链接及代码示例，略过默认模板")
-        try check(try m.text(edited.business) == userBody && m.text(edited.competition) == competitionNote, "保留原始笔记")
-        try check(m.snapshot.documents.contains(path) && !m.snapshot.documents.contains(edited.business) && !m.snapshot.documents.contains(edited.competition), "搜索收录合并后的单页")
-        try check(!m.valid(.preliminary) && !m.valid(.group(.concepts)) && !m.valid(.doc("memo.md")) && !m.canEditNote("memo.md"), "旧专题路由隔离")
+        try check(!m.valid(.preliminary) && !m.valid(.group(.concepts)) && m.valid(.group(.questions)) && m.valid(.group(.events)) &&
+                  !m.valid(.doc("memo.md")) && !m.canEditNote("memo.md"), "专题路由隔离，个股保留问题与事件")
         try check(m.snapshot.resolve(legacyEntry.id) == nil && m.snapshot.topicNotes.isEmpty && !m.snapshot.indexedDocuments.contains("memo.md"), "搜索和条目扫描均忽略专题结构")
+        do { try m.store(Entry(kind: .concepts, title: "个股概念")); throw Failure("个股不应写入概念") }
+        catch let error as Failure { try check(error.message.contains("关联专题"), "个股拒绝概念与实体条目") }
         m.go(.preliminary); m.editDoc("memo.md"); m.researchProject()
-        try check(m.place == .overview && m.dialog == nil && m.inlineNote == nil && m.consoles.isEmpty, "预研与 Memo 无法从个股打开")
+        try check(m.place == .overview && m.dialog == nil && m.inlineNote == nil && m.aiRun == nil, "预研与 Memo 无法从个股打开")
         let signature = Workspace.signature(company.url, stock: true)
         try Files.save(oldMemo, "保留旧笔记", expected: "旧笔记")
         try check(Workspace.signature(company.url, stock: true) == signature, "旧目录和文件不触发个股刷新")
+        try Files.save(Files.child(company.url, "snapshot.json"), "{}", expected: nil)
+        try check(Workspace.signature(company.url, stock: true) != signature, "快照变化触发刷新")
         let ref = Entry(kind: .references, title: "公司财报", body: "补充报告")
         try m.store(ref)
         try check(m.snapshot.resolve(ref.id) != nil, "独立个股目录仍可写入引用")
         var named = company
         named.info.title = "Tempus (TEM)"; named.info.stock?.ticker = "TEM US"
         try check(named.stockDisplayName == "Tempus" && named.stockLabel == "Tempus (TEM US)", "显示名与股票代码各出现一次")
-        try check(Set(StockModule.allCases.map { $0.category.cssColor }).count >= 6, "六模块使用六种专题分类色")
-        let all = StockModule.allCases
-        try check(m.stockModule(for: .overview) == nil && Place("home") == .overview && Place("stock:thesis") == .stock(.thesis), "公司首页与投资判断可分别访问")
-        try check(m.stockBook.homeLayout == nil && StockHomeLayout().modules == all, "已有公司默认显示全部六张卡片")
-        let saved = #"{"order":["business","references","earnings","updates","competition","thesis"],"heights":{"references":220}}"#
-        var restored = try JSONDecoder().decode(StockHomeLayout.self, from: Data(saved.utf8))
-        try check(restored.modules == all && restored.height(.references) == 220, "旧布局采用新模板章节顺序并保留高度")
-        restored.move(.references, to: .updates)
-        let roundTrip = try JSONDecoder().decode(StockHomeLayout.self, from: JSONEncoder().encode(restored))
-        try check(roundTrip.modules.firstIndex(of: .references) == all.firstIndex(of: .updates) && roundTrip.modules == restored.modules, "升级后再次拖动可保留新的顺序")
-        var layout = StockHomeLayout()
-        layout.move(.references, to: .thesis)
-        layout.move(.business, to: .updates)
-        layout.resize(.references, height: 220)
-        layout.resize(.updates, height: 1000)
-        layout.resize(.earnings, height: 0)
-        try check(layout.modules.first == .summary && layout.modules[1] == .references && layout.modules.count == 14 && layout.height(.updates) == 1000 && layout.height(.earnings) == 100 && layout.height(.business) == nil, "卡片双向拖动排序及尺寸边界")
-        try m.modifyBook { $0.homeLayout = layout }
-        m.open(other, at: .overview)
-        try check(m.stockBook.homeLayout == nil, "其他公司保留自己的首页布局")
-        m.open(company, at: .overview)
-        try check(m.stockBook.homeLayout == layout && layout.height(.references) == 220, "重新进入公司恢复卡片顺序与高度")
-        try check(all.map(\.title) == ["一页纸结论", "投资逻辑（当前版本）", "公司概况与商业模式", "业务拆分 Segments", "KPI 仪表盘", "管理层、资本配置与股东结构", "财务模型", "估值分析", "风险清单", "催化剂日历", "重大事件跟踪", "待解决问题", "决策日志", "References"], "个股侧栏名称及顺序")
-        for module in all {
-            m.openStockModule(module)
-            try check(m.stockModule(for: m.place) == module && Place(m.place.key) == m.place, "模块导航与持久化：" + module.title)
+        try check(Place("home") == .overview && Place("judgment-history") == .judgments && Place("stock:thesis") == .overview, "首页、判断与旧版入口")
+        try check(m.companyAccent(for: .overview) != nil, "公司页面使用个股配色")
+        for page in CompanyPage.allCases {
+            m.go(.company(page))
+            try check(m.place == .company(page) && Place(m.place.key) == m.place && m.companyAccent(for: m.place) != nil, "页面导航与持久化：" + page.title)
         }
-        for old in [Place("stock:competition"), .doc(edited.business), .doc("project:" + edited.competition)] {
-            m.go(old)
-            try check(m.place == .stock(.business) && m.currentNotePath == path, "旧入口重定向到业务拆分整页")
-        }
-        try m.editStockNote(path)
-        try check(m.inlineNote?.text == merged.body, "整页可直接编辑")
-        m.inlineNote?.text = "修订后的业务和竞争格局"
-        m.openStockModule(.earnings)
-        guard let growth = m.currentNotePath else { throw Failure("增长分析路径") }
-        try m.editStockNote(growth)
-        m.inlineNote?.text = "预测假设"
-        m.openStockModule(.updates)
-        guard let updates = m.currentNotePath else { throw Failure("重要更新路径") }
-        try check(!m.canEditNote(updates), "重大事件通过追加入口写入")
-        try Files.save(Files.child(company.url, updates), "本季重大事件", expected: nil)
-        m.openStockModule(.thesis)
-        m.open(other, at: .overview)
-        try check(!m.snapshot.documents.contains(path) && !m.snapshot.documents.contains(growth), "不同公司独立保存")
-        m.open(m.stocks.first { $0.id == company.id } ?? company, at: .overview)
-        let savedPage = Document(try m.text(path) ?? "")
-        try check(savedPage.body == "修订后的业务和竞争格局" && savedPage.fields["title"] == "业务", "重开后保留手工修改，旧分部不会重新追加")
-        try check(try m.text(growth) == "预测假设" && m.text(updates) == "本季重大事件", "其他章节保存")
+        try check(Set(CompanyPage.allCases.map(\.title)).count == CompanyPage.allCases.count, "个股侧栏名称不重复")
         try m.openLinkedEntity(link, in: topic)
-        try check(m.project?.id == topic.id && m.place == .entry(link.entityID) && m.stockModule(for: m.place) == nil, "专题名称直接进入原实体并切回专题侧栏")
+        try check(m.project?.id == topic.id && m.place == .entry(link.entityID) && m.companyAccent(for: m.place) == nil, "专题名称直接进入原实体并切回专题侧栏")
         m.navigate(.back)
-        try check(m.project?.id == company.id && m.place == .overview, "原实体返回公司")
-        print("PASS 十四章导航、单页业务及竞争分析迁移与编辑、增长分析与重要更新自动保存、公司隔离、实体直达")
+        try check(m.project?.id == company.id && m.place == .company(CompanyPage.allCases.last!), "原实体返回公司")
+        print("PASS 个股目录与路由隔离、页面导航与持久化、刷新签名、公司隔离、实体直达")
     }
 
     @MainActor static func main() throws {

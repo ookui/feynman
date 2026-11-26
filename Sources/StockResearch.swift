@@ -2,7 +2,7 @@ import Foundation
 
 extension Files {
     // Serialize company creation and bindings across windows or processes sharing this library.
-    static func createStock(_ root: URL, name: String, ticker: String, link: StockLink?) throws -> ProjectAt {
+    static func createStock(_ root: URL, name: String, ticker: String, link: StockLink?, intent: String = "") throws -> ProjectAt {
         let name = name.clean, ticker = ticker.clean.uppercased()
         let folder = name + (ticker.isEmpty ? "" : " (" + ticker + ")")
         guard !name.isEmpty, !folder.hasPrefix("."), !folder.contains("/"), folder.utf8.count < 230 else {
@@ -17,7 +17,7 @@ extension Files {
                 $0.info.stock?.ticker.localizedCaseInsensitiveCompare(ticker) == .orderedSame
             }) else { throw Failure("已存在相同名称和代码的公司，请从已有档案中选择。") }
             if let link { try validateLink(root, link: link, companies: companies) }
-            var info = Project(title: name, intent: "")
+            var info = Project(title: name, intent: intent.clean)
             info.stock = StockProfile(ticker: ticker, links: link.map { [$0] } ?? [])
             return try createProject(root, folder: folder, info: info)
         }
@@ -33,7 +33,7 @@ extension Files {
     }
 
     static func updateStock(_ root: URL, id: String, adding: StockLink? = nil, removing: Set<StockLink> = [],
-                            identity: (String, String)? = nil) throws {
+                            identity: (String, String)? = nil, intent: String? = nil) throws {
         try locked(child(root, "Feynman/stocks")) {
             let stocks = try catalog(root, stocks: true)
             guard let company = stocks.first(where: { $0.id == id }) else { throw Failure("公司目录已移走。") }
@@ -50,6 +50,7 @@ extension Files {
                 info.title = name.clean
                 profile.ticker = ticker.clean.uppercased()
             }
+            if let intent { info.intent = intent.clean }
             info.stock = profile
             try save(file, json(info), expected: raw)
         }
@@ -108,6 +109,8 @@ struct JudgmentDraft: Codable, Equatable, Identifiable {
     var reason = ""
     var forecast = Forecast()
     var archiveModel = false
+    /// `long`, `short`, `watch`, or empty when the user has not chosen.
+    var direction: String?
     var path: String { ".judgment-" + id.uuidString + ".md" }
 }
 struct JudgmentCorrection: Codable, Equatable, Identifiable {
@@ -125,13 +128,22 @@ struct Judgment: Codable, Equatable, Identifiable {
     var forecast: Forecast
     var modelVersion: String?
     var corrections: [JudgmentCorrection] = []
+    var direction: String?
+    /// The scenario table as it stood when the judgment was published.
+    var scenarios: ScenarioBook?
+}
+
+enum JudgmentDirection: String, CaseIterable {
+    case none = "", long, short, watch
+    var label: String {
+        switch self { case .none: return "未选择"; case .long: return "看多"; case .short: return "看空"; case .watch: return "观望" }
+    }
 }
 struct StockBook: Codable, Equatable {
     var forecast = Forecast()
     var history: [Judgment] = [] // Publication order, newest first.
     var draft: JudgmentDraft?
     var mainModel: String?
-    var homeLayout: StockHomeLayout?
 }
 
 enum StockFiles {
@@ -146,11 +158,6 @@ enum StockFiles {
         let text = try json(book)
         try Files.save(Files.child(company.url, "research.json"), text, expected: expected)
         return text
-    }
-    static func legacyReports(in company: ProjectAt) throws -> [String] {
-        let directory = try Files.child(company.url, "reports")
-        guard fm.fileExists(atPath: directory.path) else { return [] }
-        return try Files.list(directory).filter { $0.pathExtension.lowercased() == "md" }.map { "reports/" + $0.lastPathComponent }
     }
     static func documents(in company: ProjectAt) throws -> [URL] {
         try Files.list(Files.child(company.url, "documents")).filter {

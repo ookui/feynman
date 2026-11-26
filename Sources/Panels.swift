@@ -40,8 +40,10 @@ struct Panels: View {
             switch dialog {
             case .editor(let editor): EditorPanel(m:m,draft:editor)
             case .settings: SettingsPanel(m:m)
-            case .stockResearch(let id):
-                if let job = m.stockRun, job.id == id { StockResearchPanel(job: job) }
+            case .submit(let e): SubmitToTopicPanel(m: m, entry: e)
+            case .dependency(let e): DependencyPanel(m: m, question: e)
+            case .aiRun(let id):
+                if let run = m.aiRun, run.id == id { AIRunPanel(m: m, run: run) }
             default: VStack(alignment:.leading,spacing:16) { contents }.padding(24).frame(width:510)
             }
         }.background(paper)
@@ -115,8 +117,8 @@ struct Panels: View {
             Text("删除「" + materialLabel(source) + "」？").font(.title3.bold())
             referenceRemoval(.source(source))
         case .cite(let e):
-            Text("回写到知识库").font(.title3.bold()); Text("在工作台终端中交给研究终端整理「" + e.title + "」，按当前知识库规范写入并记录反向引用。")
-            HStack { Spacer(); cancel(); Button("打开终端") { m.dialog=nil; m.launch(.publish,context:e.path) }.keyboardShortcut(.defaultAction) }
+            Text("回写到知识库").font(.title3.bold()); Text("由 AI 整理「" + e.title + "」，按当前知识库规范写入并记录反向引用。下一步可修改提示词。")
+            HStack { Spacer(); cancel(); Button("继续…") { m.dialog=nil; m.launch(.publish,context:e.path) }.keyboardShortcut(.defaultAction) }
         case .backlinks(let asset):
             Text("引用这份资料的项目").font(.title3.bold()); Text(String(asset.dropFirst(8))).font(.caption).foregroundStyle(.secondary)
             if loadedBacklinks.isEmpty { Text(backlinkStatus) }
@@ -311,10 +313,11 @@ struct SettingsPanel: View {
                 }
             }; Text(test).font(.caption) }
             Divider()
-            Text("行业专题研究指令").font(.headline)
+            Text("研究指令").font(.headline)
             Picker("研究动作",selection:$action) { ForEach(Action.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
             if action == .question { Text("由当前研究终端直接回答问题").foregroundStyle(.secondary) }
-            else { TextField("Skill 名称（可留空）",text:$skill) }
+            else if action == .company { Text("个股项目的开题、快照、排雷、时间线与同步命题均使用此 skill").font(.caption).foregroundStyle(.secondary) }
+            if action != .question { TextField("Skill 名称（可留空）",text:$skill) }
             Text("默认指令").font(.caption).foregroundStyle(.secondary)
             TextEditor(text:$prompt).frame(height:64).border(.gray.opacity(0.25))
             HStack { Spacer(); Button("完成") { persist(); m.dialog=nil }.keyboardShortcut(.defaultAction) }

@@ -113,7 +113,6 @@ extension Notification.Name {
 extension Workspace {
     var currentNotePath: String? {
         switch place {
-        case .stock(let module): return module.note
         case .judgmentEditor: return stockBook.draft?.path
         case .doc(let path): return path
         case .entry(let id): return snapshot.resolve(id)?.path

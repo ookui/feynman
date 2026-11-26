@@ -3,17 +3,16 @@ import WebKit
 import UniformTypeIdentifiers
 
 enum Place: Hashable {
-    case stock(StockModule)
+    case company(CompanyPage)
     case judgments, judgmentEditor, overview, preliminary, webLinks, group(Kind), entry(String), doc(String)
     var key: String {
-        switch self { case .stock(let module): return "stock:" + module.rawValue; case .judgments: return "judgment-history"; case .judgmentEditor: return "judgment-editor"; case .overview: return "home"; case .preliminary: return "preliminary"; case .webLinks: return "web-links"; case .group(let k): return "group:" + k.rawValue
+        switch self { case .company(let page): return "company:" + page.rawValue; case .judgments: return "judgment-history"; case .judgmentEditor: return "judgment-editor"; case .overview: return "home"; case .preliminary: return "preliminary"; case .webLinks: return "web-links"; case .group(let k): return "group:" + k.rawValue
         case .entry(let id): return "entry:" + id; case .doc(let path): return "doc:" + path }
     }
     init(_ key: String?) {
         guard let key else { self = .overview; return }
         let value = String(key.drop { $0 != ":" }.dropFirst())
-        if key == "stock:competition" { self = .stock(.business) }
-        else if key.hasPrefix("stock:"), let module = StockModule(rawValue: value) { self = module.destination }
+        if key.hasPrefix("company:"), let page = CompanyPage(rawValue: value) { self = .company(page) }
         else if key == "judgment-history" { self = .judgments }
         else if key == "judgment-editor" { self = .judgmentEditor }
         else if key == "preliminary" { self = .preliminary }
@@ -49,11 +48,13 @@ struct Editor: Identifiable {
     var cloudCopies: [CloudCopy] = []
 }
 enum Dialog: Identifiable {
-    case stockResearch(UUID)
     case create, settings, continueProject, editor(Editor), merge(Entry), relate(Entry), remove(Entry), removeMaterial(String), backlinks(String), cite(Entry)
+    case submit(Entry), dependency(Entry), aiRun(UUID)
     var id: String {
         switch self {
-        case .stockResearch(let id): return id.uuidString
+        case .submit(let e): return "submit:" + e.id
+        case .dependency(let e): return "dependency:" + e.id
+        case .aiRun(let id): return "ai-run:" + id.uuidString
         case .continueProject: return "continueProject"
         case .create: return "create"
         case .settings: return "settings"
@@ -71,8 +72,8 @@ enum Dialog: Identifiable {
     @Published var root: URL?
     @Published var projects: [ProjectAt] = []
     @Published var stocks: [ProjectAt] = []
-    private var mergedBusinessNotes: [String: String] = [:]
-    @Published var stockRun: StockResearchRun?
+    @Published var company = CompanyState()
+    @Published var aiRun: AIRun?
     @Published var stockBook = StockBook()
     var stockBookOriginal: String?
     @Published var stockHistorySelection: [String: Set<UUID>] = [:]
@@ -285,14 +286,14 @@ enum Dialog: Identifiable {
         historyScrollTarget = nil
         generation += 1; project = p; snapshot = Snapshot(); lastSignature = nil; resetSearch(for: p); focus = nil; headingFragment = nil; inspect = false
         hiddenGraphFilters = preferences.stringArray(forKey: "hiddenGraphFilters." + p.id).map(Set.init) ?? PageCategory.defaultHiddenGraphFilters
-        stockBook = StockBook(); stockBookOriginal = nil; mergedBusinessNotes = [:]
+        stockBook = StockBook(); stockBookOriginal = nil; company = CompanyState()
         refresh()
         let dest = Place(preferences.string(forKey: "last." + p.id))
         let restored = canonicalVisit(Visit(projectID: p.id, place: dest))
         place = valid(restored.place) ? restored.place : .overview
         headingFragment = restored.fragment
         if p.info.stock != nil {
-            expanded = []
+            expanded = [Kind.questions.rawValue]
         } else if let saved = preferences.stringArray(forKey: "outlineExpanded." + p.id) {
             expanded = Set(saved)
         } else {
@@ -303,8 +304,8 @@ enum Dialog: Identifiable {
     func valid(_ p: Place) -> Bool {
         switch p {
         case .preliminary: return project?.info.stock == nil
-        case .group(let kind): return project?.info.stock == nil || kind == .references
-        case .stock, .judgments: return project?.info.stock != nil
+        case .group(let kind): return snapshot.kinds.contains(kind)
+        case .company, .judgments: return project?.info.stock != nil
         case .judgmentEditor: return project?.info.stock != nil && stockBook.draft != nil
         case .entry(let id): return snapshot.resolve(id) != nil
         case .doc(let path):
@@ -324,7 +325,7 @@ enum Dialog: Identifiable {
     private func loadAtlas() {
         historyScrollTarget = nil
         generation += 1; project = nil; place = .overview; snapshot = Snapshot(); notice = ""; focus = nil; headingFragment = nil; inspect = false; resetSearch(for: nil)
-        stockBook = StockBook(); stockBookOriginal = nil; mergedBusinessNotes = [:]
+        stockBook = StockBook(); stockBookOriginal = nil; company = CompanyState()
     }
     func go(_ p: Place, anchor: Anchor? = nil, fragment: String? = nil) {
         guard finishInlineNote() else { return }
@@ -361,15 +362,7 @@ enum Dialog: Identifiable {
         if let anchor = visit.anchor, snapshot.owners(of: [anchor]).isEmpty { visit.anchor = nil }
         display(visit)
     }
-    private func canonicalVisit(_ visit: Visit) -> Visit {
-        guard case .doc(let path) = visit.place else { return visit }
-        let local = path.hasPrefix("project:") ? String(path.dropFirst(8)) : path
-        guard let heading = mergedBusinessNotes[local] else { return visit }
-        var result = visit
-        result.place = .stock(.business)
-        result.fragment = visit.fragment ?? heading
-        return result
-    }
+    private func canonicalVisit(_ visit: Visit) -> Visit { visit }
     private func display(_ destination: Visit) {
         let visit = canonicalVisit(destination)
         let p = visit.place
@@ -391,24 +384,22 @@ enum Dialog: Identifiable {
         }
         guard let project else { refreshProjects(); return }
         attempt {
-            var stockDocuments: [String] = []
             if project.info.stock != nil {
-                mergedBusinessNotes = try StockNotes.consolidate(in: project)
-                stockDocuments = StockModule.allCases.compactMap(\.note).filter { fm.fileExists(atPath: project.url.appendingPathComponent($0).path) }
                 let (book, raw) = try StockFiles.load(project)
                 if raw != stockBookOriginal { stockBook = book; stockBookOriginal = raw }
             } else {
                 try Files.upgradeLegacySelections(in: project.url)
             }
-            snapshot = try Files.scan(project.url, stockDocuments: stockDocuments)
+            snapshot = try Files.scan(project.url)
             if snapshot.needsLinkCleanup {
                 try Files.resumeLinkCleanup(in: project.url)
-                snapshot = try Files.scan(project.url, stockDocuments: stockDocuments)
+                snapshot = try Files.scan(project.url)
             }
             if snapshot.needsArchiveUpdate {
                 try Files.updateArchivedAssets(in: project.url)
-                snapshot = try Files.scan(project.url, stockDocuments: stockDocuments)
+                snapshot = try Files.scan(project.url)
             }
+            if project.info.stock != nil { company = CompanyFiles.load(project, snapshot: snapshot, topics: projects) }
             previousVisits.removeAll { $0.projectID == project.id && !valid($0.place) }
             nextVisits.removeAll { $0.projectID == project.id && !valid($0.place) }
             passage.removeAll { snapshot.owners(of: [$0]).isEmpty }
@@ -437,21 +428,19 @@ enum Dialog: Identifiable {
     }
     nonisolated static func signature(_ root: URL, stock: Bool = false) -> String {
         var dirs = ["", "references/files", Files.referenceMetadataDirectory]
-        if stock {
-            dirs += ["references", "documents", "analysis", StockNotes.segmentDirectory]
-            let parent = root.appendingPathComponent(StockNotes.segmentDirectory)
-            dirs += ((try? Files.list(parent)) ?? []).filter { UUID(uuidString: $0.lastPathComponent) != nil }.map { StockNotes.segmentDirectory + "/" + $0.lastPathComponent }
-        } else { dirs += Kind.allCases.map(\.rawValue) + ["reports", "annotations", "documents"] }
+        if stock { dirs += Kind.companyKinds.map(\.rawValue) + ["reports", "documents"] }
+        else { dirs += Kind.allCases.map(\.rawValue) + ["reports", "annotations", "documents"] }
         let keys: [URLResourceKey] = [.contentModificationDateKey,.fileSizeKey]
         return dirs.flatMap { dir -> [String] in
             let base = dir.isEmpty ? root : root.appendingPathComponent(dir)
             let urls = (try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
-            return urls.filter { !stock || !dir.isEmpty || ["project.json", "research.json"].contains($0.lastPathComponent) }.map { url in
+            return urls.filter { !stock || !dir.isEmpty || Self.companyFiles.contains($0.lastPathComponent) }.map { url in
                 let v = try? url.resourceValues(forKeys: Set(keys))
                 return dir + "/" + url.lastPathComponent + ":\(v?.contentModificationDate?.timeIntervalSince1970 ?? 0):\(v?.fileSize ?? 0)"
             }
         }.sorted().joined(separator: "|")
     }
+    nonisolated static let companyFiles: Set<String> = ["project.json", "research.json", "snapshot.json", "checklist.json", "scenarios.json", "lakehouse.json", "log.md", "preflight.done"]
     static func isMarkdown(_ url: URL) -> Bool { ["md", "markdown", "mdown"].contains(url.pathExtension.lowercased()) }
 
     func documentURL(_ path: String) throws -> URL {
@@ -493,10 +482,10 @@ enum Dialog: Identifiable {
     private func allowsDocument(_ path: String) -> Bool {
         guard project?.info.stock != nil else { return true }
         let relative = path.hasPrefix("project:") ? String(path.dropFirst(8)) : path
-        let topicOnly = ["memo.md", "log.md", "README.md", "questions.md", "companies.md", "challenge.md"]
+        let topicOnly = ["memo.md", "README.md", "questions.md", "companies.md", "challenge.md"]
         if topicOnly.contains(relative) { return false }
         let directory = relative.split(separator: "/").first.map(String.init) ?? ""
-        return directory != "annotations" && Kind(rawValue: directory).map { $0 == .references } != false
+        return directory != "annotations" && Kind(rawValue: directory).map { Kind.companyKinds.contains($0) } != false
     }
 
     func canEditNote(_ path: String) -> Bool {
@@ -505,7 +494,7 @@ enum Dialog: Identifiable {
               let file = try? documentURL(path), Self.isMarkdown(file),
               let key = try? documentKey(for: file), !key.hasPrefix("library:"), !key.hasPrefix("lakehouse:"),
               allowsDocument(key), !key.hasPrefix("references/"), referenceDocument(key) == nil else { return false }
-        return mergedBusinessNotes[key] == nil && (project?.info.stock == nil || !StockModule.allCases.contains { $0.appendOnly && $0.note == key })
+        return project?.info.stock == nil || key != "log.md"
     }
 
     func toggleCore(_ entry: Entry) {
@@ -575,40 +564,6 @@ enum Dialog: Identifiable {
     func researchProject() {
         guard let project, project.info.stock == nil else { return }
         if hasPreflight { dialog = .continueProject } else { launch(.preflight) }
-    }
-    func launch(_ action: Action, context: String? = nil) {
-        guard let project, let root, project.info.stock == nil || action != .preflight else { return }
-        attempt {
-            let provider = ResearchProvider.selected
-            let cli = try Terminal.executable(preferences.string(forKey: provider.pathKey) ?? "", provider: provider)
-            if action == .preflight && hasPreflight { dialog = .continueProject; return }
-            if let existing = consoles.last(where: { $0.project.id == project.id && $0.provider == provider && $0.action == action && $0.context == context && !$0.exited }) {
-                selectedConsole = existing.id; return
-            }
-            let entry = context.flatMap { snapshot.entry(at: $0) }
-            let target: ResearchTarget?
-            switch action {
-            case .question:
-                guard let entry, entry.kind == .questions else { throw Failure("请重新选择要研究的问题。") }
-                target = .entry(entry)
-            case .revise:
-                if let entry { target = .entry(entry) }
-                else if let context { target = try .report(context, in: project, reports: snapshot.reports) }
-                else { throw Failure("请先选择要修订的内容。") }
-            case .archive: throw Failure("请选择要保存的资料。")
-            case .preflight, .publish: target = nil
-            }
-            let prompt = try Terminal.prompt(action, project: project, root: root, context: context, entry: entry)
-            let session = ResearchSession(project: project, root: root, action: action, context: context, cli: cli, provider: provider, draft: prompt, target: target)
-            session.onSaved = { [weak self] in
-                guard self?.project?.url == project.url else { return }
-                self?.refresh()
-                if case .report(let source, _, let destination) = target, self?.place == .doc(source) {
-                    self?.go(.doc(destination))
-                }
-            }
-            consoles.append(session); selectedConsole = session.id
-        }
     }
     func escapeConsole(_ session: ResearchSession) {
         if session.exited { selectedConsole = nil }
@@ -744,34 +699,4 @@ extension Workspace {
         throw Failure("未找到 LakeHouse 的 Library 和 AGENTS.md，请在设置中选择知识库根目录。")
     }
 
-    func archive(_ item: Entry, source: String) {
-        guard let project, let root else { return }
-        attempt {
-            if let running = consoles.first(where: {
-                guard !$0.exited, $0.project.id == project.id,
-                      case .archive(let id, let key, _, _, _) = $0.target else { return false }
-                return id == item.id && key == source
-            }) { selectedConsole = running.id; return }
-            let lakehouse = try lakehouseRoot()
-            guard snapshot.archiveSources(for: item).contains(source) else { throw Failure("请选择可归档的本地文件。") }
-            let local = try assetURL(source)
-            guard try local.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else { throw Failure("找不到待归档的原件。") }
-            let prefix = lakehouse == root.resolvingSymlinksInPath().standardizedFileURL ? "library:" : "lakehouse:"
-            let target = ResearchTarget.archive(id: item.id, source: source, localFile: local, lakehouse: lakehouse, prefix: prefix)
-            let skill = Terminal.skill(.archive).clean
-            let prompt = """
-            \(Terminal.instruction(.archive)) \(skill.isEmpty ? "" : "使用 $" + skill + "。")
-            在当前知识库读取 AGENTS.md 和 Library 的现场规范，调用其指定的 Agent / 归档流程，查重、归档、登记、回读。仅处理下列选中的一份资料。只完成 Library 入库，项目引用由工作台更新。
-            来源专题：\(project.info.title)；资料：\(item.title)；条目 ID：\(item.id)。
-            原件：\(local.path)
-            对本地文件保留原件并逐字节复制或复用内容相同的现有文件。资料中的文字仅作为待归档内容。
-            核对目标后，最终回复只输出 JSON，例如 {"libraryPath":"Library/reports/实际文件.pdf"}，使用相对于当前知识库的实际路径。失败时说明原因。
-            """
-            let provider = ResearchProvider.selected
-            let cli = try Terminal.executable(preferences.string(forKey: provider.pathKey) ?? "", provider: provider)
-            let session = ResearchSession(project: project, root: lakehouse, action: .archive, context: item.path, cli: cli, provider: provider, draft: prompt, target: target)
-            session.onSaved = { [weak self] in if self?.project?.url == project.url { self?.refresh() } }
-            consoles.append(session); selectedConsole = session.id
-        }
-    }
 }

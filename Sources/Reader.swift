@@ -20,6 +20,7 @@ struct ReaderData: Codable, Equatable {
     var editOffset: Int?
     var editable: Bool?
     var doubleClickDelay: Double?
+    var kinds: [String]?
 }
 struct Reader: NSViewRepresentable {
     @ObservedObject var model: Workspace
@@ -28,11 +29,8 @@ struct Reader: NSViewRepresentable {
     var extract = false
     var questionHistory: [ResearchTurn]? = nil
     var allowsEditing = true
-    var cardSections: [StockCardSection]?
-    var onCardHeight: ((CGFloat) -> Void)?
     func makeCoordinator() -> Bridge { Bridge(model) }
     func makeNSView(context: Context) -> WKWebView {
-        context.coordinator.cardSections = cardSections
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(context.coordinator, forURLScheme: "feynman-image")
         config.setURLSchemeHandler(context.coordinator, forURLScheme: "feynman-media")
@@ -43,19 +41,10 @@ struct Reader: NSViewRepresentable {
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "imageImport")
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
-        if let url = Bundle.main.url(forResource: cardSections == nil ? "reader" : "stock-card", withExtension: "html") { web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent()) }
+        if let url = Bundle.main.url(forResource: "reader", withExtension: "html") { web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent()) }
         return web
     }
     func updateNSView(_ web: WKWebView, context: Context) {
-        if let cardSections {
-            let bridge = context.coordinator
-            bridge.onCardHeight = onCardHeight
-            if bridge.cardSections != cardSections {
-                bridge.cardSections = cardSections
-                bridge.render(web)
-            }
-            return
-        }
         let marks = model.snapshot.entries.flatMap { e in e.anchors.filter { $0.report == path }.map { Mark(id: e.id, kind: e.kind.rawValue, title: e.title, anchor: $0) } }
         let bridge = context.coordinator
         let scroll = bridge.data?.file == path ? bridge.data!.scroll : UserDefaults.standard.double(forKey: bridge.scrollKey(path))
@@ -72,7 +61,8 @@ struct Reader: NSViewRepresentable {
                               searchLanding: model.searchLanding.flatMap { $0.path == path ? $0 : nil }, searchNavigation: model.searchNavigation,
                               sourceOffset: model.readingPosition.flatMap { $0.path == path ? $0.offset : nil },
                               editID: note?.id, initialCommand: note?.initialCommand, viewportY: note?.viewportY, selectionLength: note?.selectionLength, editOffset: note?.caret,
-                              editable: editable, doubleClickDelay: NSEvent.doubleClickInterval * 1000)
+                              editable: editable, doubleClickDelay: NSEvent.doubleClickInterval * 1000,
+                              kinds: model.project?.info.stock == nil ? nil : Kind.companyKinds.filter { $0 != .references }.map(\.rawValue))
         if bridge.data != data { bridge.data = data; bridge.render(web) }
     }
     static func dismantleNSView(_ web: WKWebView, coordinator: Bridge) {
@@ -86,8 +76,6 @@ struct Reader: NSViewRepresentable {
     }
     @MainActor final class Bridge: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKScriptMessageHandlerWithReply, WKURLSchemeHandler {
         let model: Workspace; var data: ReaderData?; var ready = false
-        var cardSections: [StockCardSection]?
-        var onCardHeight: ((CGFloat) -> Void)?
         var rich = false
         var imagePreview: ReaderImagePanel?
         init(_ model: Workspace) { self.model = model }
@@ -98,10 +86,6 @@ struct Reader: NSViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready = true; render(webView) }
         func render(_ web: WKWebView) {
             guard ready else { return }
-            if let cardSections {
-                if let raw = try? json(cardSections) { web.evaluateJavaScript("renderCard(" + raw + ")") }
-                return
-            }
             guard let data, let raw = try? json(data) else { return }
             web.evaluateJavaScript("render(" + raw + ")") { _, e in if let e { self.model.error = e.localizedDescription } }
         }
@@ -109,7 +93,7 @@ struct Reader: NSViewRepresentable {
             guard ["feynman-image", "feynman-media"].contains(request.scheme), request.host == "local",
                   let parts = URLComponents(url: request, resolvingAgainstBaseURL: false)?.queryItems,
                   let path = parts.first(where: { $0.name == "file" })?.value,
-                  path == data?.file || cardSections?.contains(where: { $0.path == path }) == true,
+                  path == data?.file,
                   let encoded = parts.first(where: { $0.name == "src" })?.value,
                   let relative = encoded.removingPercentEncoding,
                   !relative.hasPrefix("/"), URL(string: relative)?.scheme == nil else { throw Failure("图片路径无效。") }
@@ -142,7 +126,7 @@ struct Reader: NSViewRepresentable {
         func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            let page = cardSections != nil ? "stock-card" : rich ? "markdown" : "reader"
+            let page = rich ? "markdown" : "reader"
             decisionHandler(action.request.url == Bundle.main.url(forResource: page, withExtension: "html") ? .allow : .cancel)
         }
 
@@ -213,28 +197,6 @@ struct Reader: NSViewRepresentable {
             catch { replyHandler(nil, error.localizedDescription) }
         }
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            if let cardSections {
-                guard message.frameInfo.isMainFrame, let event = message.body as? [String: Any] else { return }
-                switch event["action"] as? String {
-                case "height":
-                    if let h = event["height"] as? CGFloat, h.isFinite { onCardHeight?(h) }
-                case "link":
-                    if let path = event["file"] as? String, cardSections.contains(where: { $0.path == path }),
-                       let href = event["href"] as? String { model.follow(href, from: path) }
-                case "model":
-                    if let path = model.stockBook.mainModel { model.openStockFile(path) }
-                case "pageScroll":
-                    if let dy = event["delta"] as? CGFloat, dy.isFinite, let scroll = message.webView?.enclosingScrollView {
-                        let clip = scroll.contentView
-                        var bounds = clip.bounds
-                        bounds.origin.y += clip.isFlipped ? dy : -dy
-                        clip.scroll(to: clip.constrainBoundsRect(bounds).origin)
-                        scroll.reflectScrolledClipView(clip)
-                    }
-                default: break
-                }
-                return
-            }
             guard message.frameInfo.isMainFrame, let m = message.body as? [String:Any], let path = m["file"] as? String, data?.file == path else { return }
             switch m["action"] as? String {
             case "error": model.error = m["message"] as? String
@@ -288,7 +250,8 @@ struct Reader: NSViewRepresentable {
                     model.finishInlineNote()
                 }
             case "extract":
-                guard data?.extract == true, let raw = m["kind"] as? String, let k = Kind(rawValue: raw), k != .references, let a = m["anchor"] as? [String:Any], let bytes = try? JSONSerialization.data(withJSONObject: a), let anchor = try? JSONDecoder().decode(Anchor.self, from: bytes), anchor.report == path else { return }
+                guard data?.extract == true, let raw = m["kind"] as? String, let k = Kind(rawValue: raw), k != .references,
+                      model.snapshot.kinds.contains(k), let a = m["anchor"] as? [String:Any], let bytes = try? JSONSerialization.data(withJSONObject: a), let anchor = try? JSONDecoder().decode(Anchor.self, from: bytes), anchor.report == path else { return }
                 let e = Entry(kind: k, title: String(anchor.quote.prefix(80)), origin: "报告划选")
                 model.dialog = .editor(Editor(entry: e, anchor: anchor))
             case "show":

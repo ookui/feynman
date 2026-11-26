@@ -25,9 +25,10 @@ extension Workspace {
             let latest = stockBook.history.first
             draft.title = latest == nil ? "首次判断" : ""
             draft.conclusion = latest?.conclusion ?? ""
+            draft.direction = latest?.direction
             draft.forecast = stockBook.forecast
             let file = try Files.child(company.url, draft.path)
-            try Files.save(file, latest?.body ?? "", expected: nil)
+            try Files.save(file, latest?.body ?? thesisOutline(), expected: nil)
             do { try modifyBook { $0.draft = draft } }
             catch { try? fm.removeItem(at: file); throw error }
         }
@@ -57,8 +58,10 @@ extension Workspace {
             if let failure = failure ?? coordination { throw failure }
             version = relative
         }
+        let scenarios = self.company.scenarios.scenarios.isEmpty ? nil : self.company.scenarios
         let record = Judgment(id: draft.id, date: Date(), title: draft.title.clean, conclusion: draft.conclusion.clean,
-                              reason: draft.reason.clean, body: body, forecast: forecast, modelVersion: version)
+                              reason: draft.reason.clean, body: body, forecast: forecast, modelVersion: version,
+                              direction: draft.direction?.nilIfEmpty, scenarios: scenarios)
         do {
             try modifyBook { book in
                 book.history.insert(record, at: 0)
@@ -72,6 +75,25 @@ extension Workspace {
         try? fm.removeItem(at: file)
         stockHistoryYear[company.id] = nil
         go(.judgments)
+    }
+
+    /// Appends the current board and scenarios to the draft, for drafts started before they were filled in.
+    func appendThesisOutline() throws {
+        guard let company = project, let draft = stockBook.draft, finishInlineNote() else { throw Failure("请先完成草稿保存。") }
+        let file = try Files.child(company.url, draft.path)
+        let old = try Files.contents(file) ?? ""
+        let text = old.clean.isEmpty ? thesisOutline() : old + (old.hasSuffix("\n") ? "\n" : "\n\n") + thesisOutline()
+        try Files.save(file, text, expected: old.isEmpty && !fm.fileExists(atPath: file.path) ? nil : old)
+        revision += 1
+        beginInlineNote(draft.path, mode: .rich)
+    }
+
+    func openLinkedEntity(_ link: StockLink, in topic: ProjectAt) throws {
+        guard link.projectID == topic.id, project?.info.stock?.links.contains(link) == true,
+              let entity = try Files.scan(topic.url).resolve(link.entityID), entity.kind == .entities else {
+            throw Failure("找不到这个专题关联的公司实体。")
+        }
+        open(topic, at: .entry(entity.id))
     }
 
     func importStockDocument(_ url: URL, companyID: String, workbook: Bool) throws {

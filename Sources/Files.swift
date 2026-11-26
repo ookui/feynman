@@ -13,6 +13,8 @@ extension String {
 enum Kind: String, CaseIterable, Codable, Identifiable {
     case questions, concepts, entities, events, references
     var id: String { rawValue }
+    /// A company project keeps its own questions, events and references. Concepts and entities live in topics.
+    static let companyKinds: [Kind] = [.questions, .events, .references]
     var label: String {
         switch self { case .questions: return "Inquiries"; case .concepts: return "概念"; case .entities: return "实体"; case .events: return "事件"; case .references: return "参考资料" }
     }
@@ -96,6 +98,21 @@ struct Entry: Identifiable, Hashable {
     var core = false
     var answered = false
     var questionHistory: [ResearchTurn] = []
+    // Company workspace fields. Topic entries leave them empty and never write them.
+    var role = ""
+    var candidate = false
+    var parent = ""
+    var check = ""
+    var marketView = ""
+    var myView = ""
+    var impact = ""
+    var evidence = ""
+    var tracking = ""
+    var kill = ""
+    var depends: [TopicDependency] = []
+    var date = ""
+    var impacts: [EventImpact] = []
+    var source = ""
     var path: String
     var original: String?
     init(kind: Kind, title: String, body: String = "", origin: String = "手工添加", id: String = UUID().uuidString.lowercased()) {
@@ -128,6 +145,20 @@ struct Entry: Identifiable, Hashable {
         core = doc.string("core") == "true"
         answered = doc.string("answered") == "true"
         questionHistory = decode([ResearchTurn].self, doc.fields["question_history"]) ?? []
+        role = doc.string("role") ?? ""
+        candidate = doc.string("candidate") == "true"
+        parent = doc.string("parent") ?? ""
+        check = doc.string("check") ?? ""
+        marketView = doc.string("market_view") ?? ""
+        myView = doc.string("my_view") ?? ""
+        impact = doc.string("impact") ?? ""
+        evidence = doc.string("evidence") ?? ""
+        tracking = doc.string("tracking") ?? ""
+        kill = doc.string("kill") ?? ""
+        depends = decode([TopicDependency].self, doc.fields["depends"]) ?? []
+        date = doc.string("date") ?? ""
+        impacts = decode([EventImpact].self, doc.fields["impacts"]) ?? []
+        source = doc.string("source") ?? ""
         self.path = path; original = raw
     }
     func clearingLinks(to ids: Set<String>, paths: Set<String>) -> Entry {
@@ -154,6 +185,12 @@ struct Entry: Identifiable, Hashable {
         if !archivedSources.isEmpty || fields["archived_sources"] != nil { fields["archived_sources"] = try json(archivedSources) }
         if !questionHistory.isEmpty || fields["question_history"] != nil { fields["question_history"] = try json(questionHistory) }
         if core { fields["core"] = "true" } else { fields.removeValue(forKey: "core") }
+        if candidate { fields["candidate"] = "true" } else { fields.removeValue(forKey: "candidate") }
+        for (key, value) in [("role", role), ("parent", parent), ("check", check), ("market_view", marketView), ("my_view", myView),
+                             ("impact", impact), ("evidence", evidence), ("tracking", tracking), ("kill", kill), ("date", date), ("source", source)]
+            where !value.isEmpty || fields[key] != nil { fields[key] = try json(value) }
+        if !depends.isEmpty || fields["depends"] != nil { fields["depends"] = try json(depends) }
+        if !impacts.isEmpty || fields["impacts"] != nil { fields["impacts"] = try json(impacts) }
         fields["aliases"] = try json(aliases); fields["deleted"] = String(deleted); fields["answered"] = String(answered)
         return "---\n" + fields.keys.sorted().map { "\($0): \(fields[$0]!)" }.joined(separator: "\n") + "\n---\n" + body
     }
@@ -182,6 +219,7 @@ struct ProjectAt: Identifiable, Hashable {
 struct Snapshot {
     var isStock = false
     var topicNotes: [String] { isStock ? [] : ["memo.md", "log.md"] }
+    var kinds: [Kind] { isStock ? Kind.companyKinds : Kind.allCases }
     var indexedDocuments: [String] { reports + documents + topicNotes }
 
     var all: [Entry] = [] { didSet { indexEntries() } }
@@ -317,7 +355,8 @@ enum Files {
             let path = legacy.standardizedFileURL.resolvingSymlinksInPath().path
             if path.hasPrefix(prefix) { project.legacyDirectory = String(path.dropFirst(prefix.count)) }
         }
-        let directories = project.stock == nil ? Kind.allCases.map(\.rawValue) + ["reports", "references/files"] : ["analysis", "documents", "versions", "references/files"]
+        let directories = project.stock == nil ? Kind.allCases.map(\.rawValue) + ["reports", "references/files"]
+            : Kind.companyKinds.map(\.rawValue) + ["reports", "references/files", "documents", "versions"]
         for dir in directories {
             try fm.createDirectory(at: try child(stage, dir), withIntermediateDirectories: true)
         }
@@ -384,7 +423,7 @@ enum Files {
         var written = ""
         try locked(root) {
             let snapshot = try scan(root)
-            guard !snapshot.isStock || entry.kind == .references else { throw Failure("请在专题内建立此类条目。") }
+            guard snapshot.kinds.contains(entry.kind) else { throw Failure("个股项目只保存问题、事件和参考资料。概念与实体请记在关联专题中。") }
             if entry.original != nil {
                 let live = snapshot.resolve(entry.id)
                 guard live?.id == entry.id else { throw Failure("条目已合并或删除，请重新选择当前条目。") }
@@ -429,12 +468,12 @@ enum Files {
             }
         }
     }
-    static func scan(_ root: URL, stockDocuments: [String] = [], indexSources: Bool = true) throws -> Snapshot {
+    static func scan(_ root: URL, indexSources: Bool = true) throws -> Snapshot {
         var result = Snapshot()
         let manifest = try contents(child(root, "project.json"))
         result.isStock = decode(Project.self, manifest)?.stock != nil
         var entries: [Entry] = [], seen = Set<String>()
-        for k in result.isStock ? [.references] : Kind.allCases {
+        for k in result.kinds {
             let dir = try child(root, k.rawValue)
             guard fm.fileExists(atPath: dir.path) else { continue }
             for f in try list(dir) where f.pathExtension.lowercased() == "md" {
@@ -454,13 +493,13 @@ enum Files {
             }
         }
         result.all = entries
-        if result.isStock {
-            result.documents = stockDocuments
-        } else {
-            result.reports = try list(child(root, "reports")).filter { $0.pathExtension.lowercased() == "md" }.map { "reports/" + $0.lastPathComponent }
-            result.documents = ["README.md","questions.md","companies.md","challenge.md"].filter { fm.fileExists(atPath: root.appendingPathComponent($0).path) }
-            result.completed = fm.fileExists(atPath: try child(root, "preflight.done").path) && !result.reports.isEmpty
+        let reports = try child(root, "reports")
+        if fm.fileExists(atPath: reports.path) {
+            result.reports = try list(reports).filter { $0.pathExtension.lowercased() == "md" }.map { "reports/" + $0.lastPathComponent }
         }
+        let documents = result.isStock ? ["log.md"] : ["README.md","questions.md","companies.md","challenge.md"]
+        result.documents = documents.filter { fm.fileExists(atPath: root.appendingPathComponent($0).path) }
+        result.completed = fm.fileExists(atPath: try child(root, "preflight.done").path) && !result.reports.isEmpty
         guard indexSources else { return result }
         let registered = Set(result.all.flatMap { $0.assets + $0.retiredAssets + Array($0.archivedSources.keys) })
         for folder in ["references", "references/files"] {

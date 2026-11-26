@@ -28,7 +28,7 @@ struct Primary: ButtonStyle {
 }
 @MainActor final class FeynmanDelegate: NSObject, NSApplicationDelegate {
     weak var workspace: Workspace?
-    func applicationWillTerminate(_ notification: Notification) { workspace?.stockRun?.cancel() }
+    func applicationWillTerminate(_ notification: Notification) { workspace?.aiRun?.cancel() }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         workspace?.finishInlineNote() == false ? .terminateCancel : .terminateNow
     }
@@ -56,6 +56,11 @@ struct FeynmanApp: App {
                     Button { model.researchProject() } label: {
                         if model.hasPreflight { Text("Continue Project Research…") } else { Text("Start Preliminary Research") }
                     }.disabled(model.project == nil)
+                } else {
+                    ForEach(CompanyTask.allCases) { task in
+                        Button(task.title + "…") { model.launchCompany(task) }
+                            .disabled(task == .thesis && model.stockBook.history.isEmpty)
+                    }
                 }
             }
         }
@@ -99,7 +104,7 @@ struct MainView: View {
     let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     var body: some View {
         GeometryReader { geometry in
-            let stockModule = model.stockModule(for: model.place)
+            let accent = model.companyAccent(for: model.place)
             let maxOutline = max(155, min(490, geometry.size.width - 555))
             let outline = max(155, min(outlineWidth, maxOutline))
             let available = geometry.size.width - (sidebar ? outline + 9 : 0)
@@ -129,9 +134,6 @@ struct MainView: View {
                     if let p = model.project {
                         Button { model.copyEvidence(model.displayedEntry?.title ?? model.currentNotePath.map(documentLabel) ?? p.info.title, target: model.place.key) } label: { Image(systemName:"link") }.help("复制此页的 Markdown 研究链接")
                         Button { NSWorkspace.shared.activateFileViewerSelecting([p.url]) } label: { Image(systemName:"folder") }.help("在 Finder 中显示项目")
-                        if let recent = model.consoles.last(where: { $0.project.id == p.id }) {
-                            Button { model.selectedConsole = model.activeConsole == nil ? recent.id : nil } label: { Image(systemName:"terminal") }.help("显示或收起研究终端")
-                        }
                         Button { if model.displayedEntry != nil { model.showEntryRelations.toggle() } else { model.inspect.toggle() } } label: { Image(systemName:"sidebar.right") }.help("显示关联与出处")
                     }
                     Button { model.dialog = .settings } label: { Label("AI 设置", systemImage:"gearshape").labelStyle(.titleAndIcon) }.buttonStyle(.borderless).fixedSize().help("设置 AI 研究服务与 CLI 路径")
@@ -156,22 +158,11 @@ struct MainView: View {
                             }
                             Inspector(m:model).frame(width: relations)
                         }
-                    }.environment(\.activeStockModule, stockModule)
-                    .tint(stockModule?.category.color ?? leaf)
+                    }.environment(\.activeAccent, accent)
+                    .tint(accent?.color ?? leaf)
                     .frame(minHeight:170)
-                    if let session = model.activeConsole {
-                        ResearchPanel(model:model, session:session).frame(minHeight: geometry.size.height / 3).focusedValue(\.editingNavigationKeys, true)
-                    }
                 }
-                if let job = model.stockRun, job.company.id == model.project?.id, !job.status.isEmpty {
-                    HStack {
-                        Image(systemName: "sparkles")
-                        Text(job.status).lineLimit(1)
-                        Spacer()
-                        Button("查看研究") { model.dialog = .stockResearch(job.id) }
-                        if !job.running { Button("关闭") { model.stockRun = nil } }
-                    }.font(.callout).padding(8).background(rail)
-                }
+                if let run = model.aiRun, run.project.id == model.project?.id { AIRunBar(m: model, run: run) }
                 if !model.notice.isEmpty || !model.snapshot.issues.isEmpty {
                     HStack { Text(model.notice.isEmpty ? model.snapshot.issues.joined(separator:" · ") : model.notice).font(.caption); Spacer(); Button("关闭") { model.notice = ""; model.snapshot.issues = [] }.buttonStyle(.plain) }.padding(8).background(rail)
                 }
@@ -414,14 +405,7 @@ struct Sidebar: View {
                                 }.buttonStyle(SidebarLinkStyle(selected: m.place == .overview, color: PageCategory.stock.color, verticalInset: 6))
                                     .help("打开公司首页").accessibilityIdentifier("stock.home")
                                     .padding(.bottom, 4)
-                                ForEach(StockModule.allCases, id: \.self) { module in
-                                    Button { m.openStockModule(module) } label: {
-                                        Label { Text(verbatim: module.heading).foregroundStyle(ink) } icon: {
-                                            Image(systemName: module.symbol).foregroundStyle(module.category.color)
-                                        }
-                                    }.buttonStyle(SidebarLinkStyle(selected: m.stockModule(for: m.place) == module, color: module.category.color, verticalInset: 7))
-                                        .accessibilityIdentifier("stock.module." + module.rawValue)
-                                }
+                                CompanyOutline(m: m)
                             } else { outline }
                         } else {
                             HStack {

@@ -11,10 +11,10 @@ struct ProjectDetail: View {
     @ViewBuilder var body: some View {
         switch m.place {
         case .judgments: StockThesis(m: m, company: p).id(p.id)
-        case .stock(let module): StockModulePage(m: m, company: p, module: module).id(p.id + module.rawValue)
+        case .company(let page): CompanyPageView(m: m, company: p, page: page).id(p.id + page.rawValue)
         case .judgmentEditor: StockJudgmentEditor(m: m, company: p)
         case .overview:
-            if p.info.stock != nil { StockHome(m: m, company: p).id(p.id) }
+            if p.info.stock != nil { CompanyHome(m: m, company: p).id(p.id) }
             else { overview }
         case .preliminary: preliminary
         case .group(.references): ReferenceDirectory(m: m)
@@ -23,9 +23,7 @@ struct ProjectDetail: View {
         case .entry, .doc:
             let item = m.displayedEntry
             let document: String? = { if case .doc(let path) = m.place { return path }; return nil }()
-            if let document, let module = m.stockModule(for: m.place), module.note == document {
-                StockModulePage(m: m, company: p, module: module).id(p.id + module.rawValue)
-            } else if let item, item.kind == .references {
+            if let item, item.kind == .references {
                 ReferenceFilePage(m: m, entry: item, document: document).id(document ?? item.id)
             } else if let path = document ?? item?.path {
                 notePage(path: path, entry: item)
@@ -76,7 +74,7 @@ struct ProjectDetail: View {
                             metadata: m.snapshot.completed ? "预研已完成" : m.snapshot.reports.isEmpty ? "待预研" : "已有报告",
                             subtitle: p.info.intent) {
                     Button { m.researchProject() } label: {
-                        Label(m.hasPreflight ? "继续研究此项目…" : "开始预研", systemImage: "terminal")
+                        Label(m.hasPreflight ? "继续研究此项目…" : "开始预研", systemImage: "sparkles")
                     }
                     .buttonStyle(ResearchActionStyle())
                 }
@@ -127,11 +125,18 @@ struct ProjectDetail: View {
         return VStack(alignment: .leading, spacing: 0) {
             if let entry { entryHeading(entry) }
             else { PageHeading(title: documentLabel(path), category: PageCategory(document: path)) { documentActions(path, body) } }
+            if let entry, p.info.stock != nil {
+                if entry.kind == .questions { CruxPanel(m: m, question: entry).id(entry.id) }
+                if entry.kind == .events { EventPanel(m: m, event: entry).id(entry.id) }
+            }
+            if let entry, p.info.stock == nil, entry.kind == .entities, let stock = m.stock(for: entry) {
+                LinkedStockCard(m: m, stock: stock).id(stock.id)
+            }
             Divider()
             if case .failure(let err) = result, m.inlineNote?.path != path { Text(err.localizedDescription).padding() }
             else {
                 NoteBody(m: m, path: path, text: body,
-                         extract: p.info.stock == nil && entry == nil && (path.hasPrefix("reports/") || path == "questions.md"),
+                         extract: entry == nil && (path.hasPrefix("reports/") || (p.info.stock == nil && path == "questions.md")),
                          history: entry?.kind == .questions ? entry?.questionHistory : nil)
             }
         }
@@ -143,7 +148,7 @@ struct ProjectDetail: View {
                                  editableTitle: EntryPageTitle(model: m, entry: e)) {
             PageActions {
                 if e.kind == .questions {
-                    Button("继续研究此问题") { m.launch(.question, context: e.path) }
+                    Button { m.launch(.question, context: e.path) } label: { Label("AI 研究", systemImage: "sparkles") }
                         .buttonStyle(ResearchActionStyle())
                 }
                 Button("关联…") { m.dialog = .relate(e) }
@@ -154,13 +159,18 @@ struct ProjectDetail: View {
                     Button(e.core ? "取消核心标记" : "标为核心条目") { m.toggleCore(e) }
                     if e.kind != .questions { Button("用 AI 修订正文") { m.launch(.revise, context:e.path) } }
                     if e.kind == .questions {
-                        Button("添加子问题…") {
-                            var question = Entry(kind:.questions,title:"")
-                            question.links = [e.id]
-                            m.dialog = .editor(Editor(entry:question))
+                        Button("添加子问题…") { m.newSubQuestion(of: e) }
+                        Button(e.answered ? "重新打开问题" : "标为已回答") { m.toggleQuestionStatus(e.id) }
+                        if p.info.stock != nil {
+                            if e.role == "crux" { Button("移出关键问题") { m.attempt { try m.updateEntry(e.id) { $0.role = ""; $0.candidate = false } } } }
+                            else { Button("设为关键问题") { m.attempt { try m.updateEntry(e.id) { $0.role = "crux"; $0.candidate = false; $0.parent = "" } } } }
+                            Button("添加行业依据…") { m.dialog = .dependency(e) }
                         }
-                        Button(e.answered ? "重新打开问题" : "标为已回答") { m.toggleQuestionStatus(e.id) } }
-                    Button("引用到我的 Memo") { m.editDoc("memo.md",append:"[" + e.title + "](feynman:" + e.id + ")") }
+                    }
+                    if p.info.stock != nil && (e.kind == .questions || e.kind == .events) {
+                        Button("提交到专题…") { m.dialog = .submit(e) }
+                    }
+                    if p.info.stock == nil { Button("引用到我的 Memo") { m.editDoc("memo.md",append:"[" + e.title + "](feynman:" + e.id + ")") } }
                     Button("关联知识库资料…") { m.attach(library:true,to:e) }
                     Button("添加参考资料…") { m.attach(library:false,to:e) }
                     Button("回写到知识库…") { m.dialog = .cite(e) }
@@ -179,7 +189,7 @@ struct ProjectDetail: View {
     private func documentActions(_ path: String, _ body: String) -> some View {
         PageActions {
             if path == "memo.md", !body.clean.isEmpty { Button("回写到知识库…") { m.launch(.publish,context:path) } }
-            if p.info.stock == nil && path.hasPrefix("reports/") {
+            if path.hasPrefix("reports/") {
                 Button("用 AI 修订报告") { m.launch(.revise, context:path) }
                 Button("查看出处") { m.inspect.toggle() }
             }

@@ -67,7 +67,6 @@ struct AddReferenceActions: View {
 struct ReferenceDirectory: View {
     @ObservedObject var m: Workspace
     @State private var companyDocuments: [URL] = []
-    @State private var legacyStockReports: [String] = []
     var body: some View {
         let entries = m.snapshot.entries.filter { $0.kind == .references }
         let webCount = entries.filter(m.snapshot.isWebReference).count + m.snapshot.unlistedMaterials.filter(MaterialLinks.isWeb).count
@@ -95,10 +94,6 @@ struct ReferenceDirectory: View {
                                 removeMaterial("project:" + path)
                             }
                         }
-                        ForEach(legacyStockReports, id: \.self) { path in
-                            fileRow(documentLabel(path), symbol: "doc.text") { m.go(.doc(path)) }
-                                .contextMenu { removeMaterial("project:" + path) }
-                        }
                     }
                     fileRow("网页链接（" + String(webCount) + "）", symbol: "link") { m.go(.webLinks) }
                     ForEach(entries.filter { !m.snapshot.isWebReference($0) }) { entry in
@@ -113,11 +108,8 @@ struct ReferenceDirectory: View {
             }
         }.modifier(ReferenceFileDrop(m: m))
         .task(id: m.revision) {
-            guard let company = m.project, company.info.stock != nil else { companyDocuments = []; legacyStockReports = []; return }
-            m.attempt {
-                companyDocuments = try StockFiles.documents(in: company)
-                legacyStockReports = try StockFiles.legacyReports(in: company)
-            }
+            guard let company = m.project, company.info.stock != nil else { companyDocuments = []; return }
+            m.attempt { companyDocuments = try StockFiles.documents(in: company) }
         }
     }
     private func removeMaterial(_ source: String) -> some View {
@@ -141,7 +133,7 @@ struct ReferenceDirectory: View {
 }
 
 struct ReferencePage: View {
-    @Environment(\.activeStockModule) private var module
+    @Environment(\.activeAccent) private var accent
     @ObservedObject var m: Workspace
     var body: some View {
         let links = m.snapshot.entries.filter(m.snapshot.isWebReference)
@@ -154,11 +146,11 @@ struct ReferencePage: View {
             List {
                 ForEach(links) { entry in
                     Button { m.go(.entry(entry.id)) } label: { Label(entry.title, systemImage: "link").fontWeight(entry.core ? .bold : .regular) }
-                        .buttonStyle(SidebarLinkStyle(color: (module?.category ?? .webLinks).color)).contextMenu { EntryActions(m: m, entry: entry) }
+                        .buttonStyle(SidebarLinkStyle(color: (accent ?? .webLinks).color)).contextMenu { EntryActions(m: m, entry: entry) }
                 }
                 ForEach(unlisted, id: \.self) { source in
                     Button(materialLabel(source)) { m.attempt { m.go(.entry(try m.registerMaterial(source).id)) } }
-                        .buttonStyle(SidebarLinkStyle(color: (module?.category ?? .webLinks).color))
+                        .buttonStyle(SidebarLinkStyle(color: (accent ?? .webLinks).color))
                         .contextMenu { Button("删除…", role: .destructive) { m.dialog = .removeMaterial(source) } }
                 }
                 if links.isEmpty && unlisted.isEmpty { Text("尚未添加网页链接。").foregroundStyle(.secondary) }

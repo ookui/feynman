@@ -22,8 +22,12 @@ struct StockThesis: View {
             ScrollViewReader { scroll in
                 ScrollView {
                     VStack(spacing: 0) {
-                        PageHeading(title: "已发布判断与历史", category: .stock, metadata: company.stockLabel) {
-                            Button("编辑公司资料") { identityEditor = true }
+                        PageHeading(title: "投资判断", category: .judgment, metadata: company.stockLabel) {
+                            PageActions {
+                                Button("同步到 LakeHouse") { m.launchCompany(.thesis) }
+                                    .disabled(m.stockBook.history.isEmpty).help(CompanyTask.thesis.help)
+                                Button("编辑公司资料") { identityEditor = true }
+                            }
                         }
                         HStack(alignment: .top, spacing: 10) {
                             VStack(spacing: 10) {
@@ -31,6 +35,7 @@ struct StockThesis: View {
                                 StockHistory(m: m, company: company)
                             }.frame(maxWidth: .infinity)
                             VStack(spacing: 10) {
+                                LakehouseThesisCard(m: m)
                                 StockModels(m: m, company: company)
                                 StockTopics(m: m, company: company)
                             }.frame(width: min(285, max(169, geometry.size.width * 0.31)))
@@ -46,7 +51,12 @@ struct StockThesis: View {
     private var current: some View {
         StockSection(title: "当前投资判断") {
             if let latest = m.stockBook.history.first {
-                Text(latest.date.formatted(date: .long, time: .omitted)).font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Text(latest.date.formatted(date: .long, time: .omitted)).font(.caption).foregroundStyle(.secondary)
+                    if let direction = latest.direction.flatMap(JudgmentDirection.init(rawValue:)), direction != .none {
+                        Tag(text: direction.label, color: PageCategory.judgment.color)
+                    }
+                }
                 Text(latest.conclusion).font(.title3.weight(.semibold)).textSelection(.enabled)
                 Text(latest.reason).foregroundStyle(.secondary).textSelection(.enabled)
                 if !latest.body.isEmpty {
@@ -78,12 +88,22 @@ struct StockJudgmentEditor: View {
                     Text("更新投资判断").font(.title2.bold())
                     Spacer()
                     Button("返回主页") { m.go(.overview) }
-                    Button("发布判断") { m.attempt { try m.publishJudgment() } }.buttonStyle(Primary())
+                    Button("发布判断") { m.attempt { try m.publishJudgment(); m.launchCompany(.thesis) } }.buttonStyle(Primary())
+                        .help("发布后在终端中同步到 LakeHouse Theses")
                 }
                 TextField("变动标题，例如下调检测毛利率假设、维持判断", text: field(\.title, default: ""))
                 TextField("一句话投资结论", text: field(\.conclusion, default: ""), axis: .vertical)
                 TextField("本次为什么调整或维持判断", text: field(\.reason, default: ""), axis: .vertical)
-                Text("关键假设与引用依据").font(.headline)
+                Picker("方向", selection: Binding(get: { JudgmentDirection(rawValue: draft.direction ?? "") ?? .none },
+                                                set: { value in m.attempt { try m.modifyBook { $0.draft?.direction = value.rawValue } } })) {
+                    ForEach(JudgmentDirection.allCases, id: \.self) { Text($0.label).tag($0) }
+                }.pickerStyle(.segmented).fixedSize()
+                HStack {
+                    Text("命题、与市场的分歧、证伪条件与跟踪指标").font(.headline)
+                    Spacer()
+                    Button("插入关键问题与情景摘要") { m.attempt { try m.appendThesisOutline() } }
+                        .help("把看板上你写的判断、证伪条件和情景估值追加到正文末尾")
+                }
                 NoteBody(m: m, path: draft.path, text: (try? m.text(draft.path)) ?? "").frame(minHeight: 90)
                 Divider()
                 HStack {
@@ -236,18 +256,39 @@ struct StockIdentityEditor: View {
     @Environment(\.dismiss) var dismiss
     @State private var name = ""
     @State private var ticker = ""
+    @State private var intent = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("公司资料").font(.title2.bold())
             TextField("公司名称", text: $name)
             TextField("股票代码", text: $ticker)
+            TextField("为什么现在看：事件、价格，或专题里出现的线索", text: $intent, axis: .vertical).lineLimit(2...5)
             HStack { Spacer(); Button("取消") { dismiss() }
                 Button("保存") {
                     guard let root = m.root else { return }
-                    m.attempt { try Files.updateStock(root, id: company.id, identity: (name, ticker)); m.refreshProjects(); dismiss() }
+                    m.attempt { try Files.updateStock(root, id: company.id, identity: (name, ticker), intent: intent); m.refreshProjects(); dismiss() }
                 }.disabled(name.clean.isEmpty)
             }
-        }.padding(20).frame(width: 370)
-            .onAppear { name = company.info.title; ticker = company.info.stock?.ticker ?? "" }
+        }.padding(20).frame(width: 420)
+            .onAppear { name = company.info.title; ticker = company.info.stock?.ticker ?? ""; intent = company.info.intent }
+    }
+}
+
+struct LakehouseThesisCard: View {
+    @ObservedObject var m: Workspace
+    var body: some View {
+        StockSection(title: "LakeHouse 命题") {
+            if let path = m.company.lakehouse?.thesis {
+                Button { m.go(.doc(m.lakehouseKey(path))) } label: {
+                    Label((path as NSString).lastPathComponent, systemImage: "doc.text").lineLimit(2)
+                }.buttonStyle(.link).foregroundStyle(ink)
+                if let date = m.company.lakehouse?.synced { Text("同步于 " + date).font(.caption).foregroundStyle(.secondary) }
+                if let id = m.company.lakehouse?.judgment, let latest = m.stockBook.history.first, latest.id.uuidString != id {
+                    Text("最新发布的判断尚未同步").font(.caption).foregroundStyle(.orange)
+                }
+            } else {
+                Text(m.stockBook.history.isEmpty ? "发布判断后同步到 Theses。" : "尚未同步。").foregroundStyle(.secondary)
+            }
+        }
     }
 }

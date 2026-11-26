@@ -2,6 +2,7 @@ import SwiftUI
 
 enum PageCategory {
     case stock, project, report, kind(Kind), webLinks, log, memo, images, documents
+    case company(CompanyPage), judgment
 
     var graphFilterKey: String {
         switch self {
@@ -35,6 +36,8 @@ enum PageCategory {
         case .webLinks: return "Web Links"
         case .log: return "Log"
         case .memo: return "Memo"
+        case .judgment: return "Judgment"
+        case .company(let page): return page.englishLabel
         }
     }
 
@@ -51,6 +54,13 @@ enum PageCategory {
         case .webLinks: return 0x00858C
         case .log: return 0x16855D
         case .memo: return 0xBC4679
+        case .judgment: return 0x9A3B5C
+        case .company(.cruxes): return 0xC76509
+        case .company(.snapshot): return 0x1F6FA8
+        case .company(.checklist): return 0xB23A2E
+        case .company(.scenarios): return 0x2E7D5B
+        case .company(.timeline): return 0x8054DC
+        case .company(.reports): return 0x718615
         }
     }
 
@@ -94,11 +104,23 @@ struct QuestionStatusButton: View {
     }
 }
 
+private struct ActiveAccentKey: EnvironmentKey {
+    static let defaultValue: PageCategory? = nil
+}
+
+extension EnvironmentValues {
+    /// The colour family of the current company page. Topic pages leave it empty.
+    var activeAccent: PageCategory? {
+        get { self[ActiveAccentKey.self] }
+        set { self[ActiveAccentKey.self] = newValue }
+    }
+}
+
 struct PageHeading<Content: View>: View {
     let title: String
     let category: PageCategory
-    @Environment(\.activeStockModule) private var stockModule
-    private var accent: PageCategory { stockModule?.category ?? category }
+    @Environment(\.activeAccent) private var companyAccent
+    private var accent: PageCategory { companyAccent ?? category }
     var titleSize: CGFloat = 28
     var showsTag = true
     var metadata: String = ""
@@ -141,12 +163,12 @@ struct PageHeading<Content: View>: View {
     }
 
     private var actions: some View {
-        content().tint(accent.color).foregroundStyle(stockModule == nil ? accent.color : ink)
+        content().tint(accent.color).foregroundStyle(companyAccent == nil ? accent.color : ink)
     }
 
     private var tags: some View {
         HStack(spacing: 8) {
-            if showsTag { CategoryTag(category: category, accent: stockModule?.category).fixedSize() }
+            if showsTag { CategoryTag(category: category, accent: companyAccent).fixedSize() }
             status
             if !metadata.isEmpty {
                 Text(metadata).font(.callout).foregroundStyle(.secondary)

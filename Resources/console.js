@@ -17,6 +17,10 @@ function fit() {
 }
 new ResizeObserver(fit).observe(host);
 requestAnimationFrame(fit);
+function setProvider(name) {
+  send.textContent='发送给 '+name;
+  editor.setAttribute('aria-label', name+' 提示词');
+}
 function setDraft(text) {
   editor.value=text;
   editor.setSelectionRange(0,0);

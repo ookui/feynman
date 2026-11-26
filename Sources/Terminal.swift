@@ -1,7 +1,7 @@
 import AppKit
 
 enum Action: String, CaseIterable, Identifiable {
-    case preflight = "预研", question = "追问", revise = "修订", publish = "回写", archive = "资料入库"
+    case preflight = "预研", question = "追问", revise = "修订", publish = "回写", archive = "资料入库", company = "个股"
     var id: Self { self }
     var prompt: String {
         switch self {
@@ -10,6 +10,7 @@ enum Action: String, CaseIterable, Identifiable {
         case .revise: return "结合项目资料修订所选内容，保留仍然成立的事实和来源。"
         case .archive: return "调用 LakeHouse 的归档流程，将所选原始资料保存到 Library。"
         case .publish: return "根据知识库现行规范，将所选研究成果写回适合的位置，记录来源项目和原文件，回读核对并更新研究日志。"
+        case .company: return "按个股研究 skill 执行所选动作，只写当前公司目录；同步命题时按知识库规范写入 Theses。"
         }
     }
 }
@@ -197,12 +198,12 @@ enum ResearchProvider: String, CaseIterable {
         case .claude:
             var args = batch ? ["-p", "--output-format", "text"] : []
             if batch && action != .archive { args += Self.claudeResearch(knowledge: root) }
-            else if action == .publish { args += ["--add-dir", root.path] }
+            else if action == .publish || action == .company { args += ["--add-dir", root.path] }
             if action == .archive { args += ["--add-dir", project.path] }
             return args
         case .gemini:
             var args = batch ? ["--output-format", "text", "--approval-mode", action == .archive ? "default" : "plan"] : []
-            if action == .publish || action == .archive { args += ["--include-directories", action == .archive ? project.path : root.path] }
+            if action == .publish || action == .company || action == .archive { args += ["--include-directories", action == .archive ? project.path : root.path] }
             return args
         }
     }
@@ -219,6 +220,7 @@ enum Terminal {
         if action == .question { return "" }
         let configured = defaults.string(forKey: "skill." + action.rawValue)
         if action != .preflight, configured?.trimmingCharacters(in: CharacterSet(charactersIn: "$ ")) == "sling-thematic-study" { return "" }
+        if action == .company { return configured ?? "sling-company-study" }
         return configured ?? (action == .preflight ? "sling-thematic-study" : (action == .publish || action == .archive) ? "sling-lakehouse-protocol" : "")
     }
     static func executable(_ override: String, provider: ResearchProvider = .codex) throws -> URL {
@@ -243,7 +245,7 @@ enum Terminal {
     static func arguments(project: URL, root: URL, action: Action) -> [String] {
         if action == .archive { return ["-C", root.path] }
         var args = ["-C", project.path]
-        if action == .publish { args += ["--add-dir", root.path] }
+        if action == .publish || action == .company { args += ["--add-dir", root.path] }
         return args
     }
     static func prompt(_ action: Action, project: ProjectAt, root: URL, context: String?, entry: Entry? = nil) throws -> String {
@@ -271,6 +273,7 @@ enum Terminal {
             } else { parts.append("继续研究专题「" + project.info.title + "」，修订报告 " + context + "。") }
             parts += [instruction(action), "读取 " + context + " 的完整内容、关联条目及出处。把补充问题的答案融入原文，整理成完整、精练的总结。"]
         case .archive: throw Failure("请选择要保存到 Library 的资料。")
+        case .company: throw Failure("请从公司首页选择研究动作。")
         case .publish:
             guard let context else { throw Failure("请选择要回写的内容。") }
             parts = ["将「" + (entry?.title ?? context) + "」回写到知识库。", instruction(action),

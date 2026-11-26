@@ -105,7 +105,7 @@ private struct LinkedTopicRows: View {
                     Spacer(minLength: 0)
                     Image(systemName: "arrow.up.right").font(.caption).foregroundStyle(.tint)
                 }
-            }.buttonStyle(SidebarLinkStyle(color: StockModule.thesis.category.color, verticalInset: 6))
+            }.buttonStyle(SidebarLinkStyle(color: PageCategory.stock.color, verticalInset: 6))
                 .foregroundStyle(ink)
                 .accessibilityIdentifier("stock.topic." + topic.id + "." + link.entityID)
                 .help("打开「" + topic.info.title + "」中的公司实体")

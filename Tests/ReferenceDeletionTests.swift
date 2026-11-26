@@ -24,8 +24,8 @@ import Foundation
             let asset = ref.assets[0]
             let payload = try Files.child(project.url, String(asset.dropFirst(8)))
             let cross = "[跨项目](<feynman://research?project=" + project.id + "&target=entry:" + id + ">)"
-            let note = project.id == topic.id ? "memo.md" : "analysis/business.md"
-            let otherNote = project.id == topic.id ? "analysis/business.md" : "memo.md"
+            let note = project.id == topic.id ? "memo.md" : "reports/base-v1.md"
+            let otherNote = project.id == topic.id ? "reports/base-v1.md" : "memo.md"
             let a = try Files.child(project.url, note), b = try Files.child(other.url, otherNote)
             let keep = "[保留](https://example.org/other)"
             let code = "`[示例](feynman:" + id + ")`"

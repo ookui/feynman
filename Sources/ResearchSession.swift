@@ -159,6 +159,7 @@ final class ResearchPTY {
         let rows = min(400, max(4, msg["rows"] as? Int ?? 16))
         switch msg["action"] as? String {
         case "ready":
+            if let name = try? json(provider.rawValue) { web?.evaluateJavaScript("setProvider(" + name + ")") }
             if exited { showExit(status); return }
             if phase == .followUp { offerFollowUp(); return }
             guard phase == .draft else { return }
