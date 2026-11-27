@@ -6,7 +6,7 @@ enum Action: String, CaseIterable, Identifiable {
     var prompt: String {
         switch self {
         case .preflight: return "开展专题预研。先检查已有成果，补齐预研报告、关键问题、概念、实体、事件与参考资料。"
-        case .question: return "结合项目资料回答这个问题，给出依据、反证和仍待核实之处。"
+        case .question: return "结合项目资料回答这个问题。按问题本身的推理链写成连贯的论证：开头直接给出结论、把握程度和最关键的理由；证据和反证写在它们各自支撑或针对的那一环，注明日期、口径和出处，并说明反证是否改变结论；点明论证中最薄弱的一环；结尾只写会改变结论的未知事项及取得途径。不使用「当前结论」「支持证据」「反证」「缺口」「跟踪记录」等固定小节；需要分段时，小标题按内容命名。用具体数字、机制和可比案例把道理讲清楚，不用排比和渲染。"
         case .revise: return "结合项目资料修订所选内容，保留仍然成立的事实和来源。"
         case .archive: return "调用 LakeHouse 的归档流程，将所选原始资料保存到 Library。"
         case .publish: return "根据知识库现行规范，将所选研究成果写回适合的位置，记录来源项目和原文件，回读核对并更新研究日志。"
@@ -213,7 +213,9 @@ enum Terminal {
     static let defaults = UserDefaults.standard
     static func instruction(_ action: Action) -> String {
         let saved = defaults.string(forKey: "prompt." + action.rawValue)
-        if action == .question, saved == "集中回答当前问题。核实证据，说明反证和仍未解决之处，更新问题正文并关联相关条目。" { return action.prompt }
+        // Earlier defaults asked for a fixed evidence / counter-evidence / gaps layout; a saved copy of one follows the new default.
+        let retired = ["集中回答当前问题。核实证据，说明反证和仍未解决之处，更新问题正文并关联相关条目。", "结合项目资料回答这个问题，给出依据、反证和仍待核实之处。"]
+        if action == .question, let saved, retired.contains(saved) { return action.prompt }
         return saved ?? action.prompt
     }
     static func skill(_ action: Action) -> String {
@@ -296,7 +298,7 @@ enum Terminal {
         if !entry.anchors.isEmpty {
             parts.append("关联原文\n" + entry.anchors.prefix(4).map { $0.report + " · " + String($0.quote.prefix(300)) }.joined(separator: "\n"))
         }
-        parts += [instruction(.question), "先读取 " + entry.path + " 中的完整正文、历次问答和相关出处。把本轮发现融入已有回答，保留相关证据与出处，合并重复表述。"]
+        parts += [instruction(.question), "先读取 " + entry.path + " 中的完整正文、历次问答和相关出处。把本轮发现融入已有回答，放进它所影响的那一环，保留相关证据与出处，合并重复表述。已有正文仍按「当前结论」「支持证据」「反证」「缺口」「跟踪记录」等固定小节组织时，本轮把它整体改写为连贯论证（edits 可用一项引用整段原文），保留全部数字、出处和仍成立的判断。各轮问答由工作台另行保存，正文不追加流水记录。"]
         return parts.joined(separator: "\n\n")
     }
     static func version(_ executable: URL) throws -> String {

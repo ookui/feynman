@@ -72,8 +72,16 @@ import AppKit
         // Submit an industry finding to the topic.
         let submitted = try m.submitToTopic(m.snapshot.resolve(sub.id)!, topic: topic, title: "日本潮玩渠道")
         let written = try Files.scan(topic.url).resolve(submitted.id)!
-        try check(written.title == "日本潮玩渠道" && written.origin == "个股提交" && written.body.contains("feynman://research") && written.role.isEmpty, "提交到专题并附回链")
+        try check(written.title == "日本潮玩渠道" && written.origin == "个股提交" && written.body.contains("feynman://research") && written.role.isEmpty && written.links == [entity.id], "提交到专题并附回链，关联个股实体")
         try check(m.snapshot.resolve(sub.id)!.depends.contains { $0.entry == submitted.id } && m.company.dependencies[sub.id]?.first?.status == .current, "提交后本问题自动引用")
+
+        // A new industry question: empty, related to the company entity, relied on by the company question.
+        let industry = try m.newTopicQuestion(for: m.snapshot.resolve(crux.id)!, topic: topic, title: "潮玩行业的海外渠道费率")
+        let industryRead = try Files.scan(topic.url).resolve(industry.id)!
+        try check(industryRead.kind == .questions && industryRead.body.clean.isEmpty && industryRead.links == [entity.id] && industryRead.role.isEmpty, "新建行业问题为空白并关联个股实体")
+        try check(m.snapshot.resolve(crux.id)!.depends.contains { $0.project == topic.id && $0.entry == industry.id }, "新建的行业问题成为本问题的依据")
+        try check(m.linkedTopics().map(\.topic.id) == [topic.id], "只列出已关联的专题")
+        try check(m.company.dependencies[crux.id]?.contains { $0.resolvedID == industry.id && $0.kind == .questions && $0.status == .current } == true, "关系图可取得新依据的类型与状态")
 
         // Lenient snapshot and checklist files.
         let snapshotJSON = #"{"asOf":"2026-11-26","source":"Wind","price":{"value":182.4,"date":"2026-11-25","currency":"HKD"},"valuation":[{"name":"PE（NTM）","value":"24x","percentile":"35% 分位"}],"implied":[{"name":"隐含增速","value":0.18}],"narrative":["海外是主线"],"quarterly":{"periods":["Q1","Q2"],"rows":[{"name":"收入","values":[10,12.5]}]}}"#
@@ -92,6 +100,26 @@ import AppKit
         let flagQuestion = m.flagQuestion(for: flag)
         try check(flagQuestion?.role == "flag" && flagQuestion?.check == "rev-cash" && flagQuestion?.body.contains("https://example.com/r.pdf") == true &&
                   m.place == .entry(flagQuestion!.id) && m.flagQuestions.count == 1, "异常项升级为排雷问题")
+
+        // The user grades checklist items; the AI's file stays as written.
+        let aiChecklist = try m.text("checklist.json")
+        try m.setCheck(flag, to: .watch)
+        try check(m.checkStatus(flag) == .watch && flag.state == .flag && m.checkDecision(flag)?.status == "watch" && (try m.text("checklist.json")) == aiChecklist, "降为关注，AI 结果保留")
+        try m.noteCheck(flag, note: "应收增速回落，继续观察")
+        try m.setCheck(flag, to: .ok)
+        try check(m.checkStatus(flag) == .ok && m.checkDecision(flag)?.note == "应收增速回落，继续观察" && m.flagQuestions(for: flag).allSatisfy(\.answered), "降为正常时关闭关联问题")
+        let reloaded = Workspace(initialRoot: root)
+        reloaded.open(reloaded.stocks.first { $0.id == company.id }!, at: .company(.checklist))
+        try check(reloaded.checkStatus(flag) == .ok, "定级保存在 checklist-review.json")
+        try m.resetCheck(flag)
+        try check(m.checkStatus(flag) == .flag && m.checkDecision(flag) == nil, "恢复 AI 的判断")
+        let pledge = items[0]
+        try m.upgradeCheck(pledge)
+        let pledgeQuestion = m.flagQuestions(for: pledge).first
+        try check(m.checkStatus(pledge) == .flag && pledgeQuestion?.role == "flag" && m.place == .entry(pledgeQuestion!.id), "正常项可升级为问题")
+        try m.upgradeCheck(flag)
+        try check(m.flagQuestions(for: flag).count == 1 && m.flagQuestions(for: flag).first?.answered == false, "已有问题时重新打开，不重复建")
+        try m.setCheck(pledge, to: .na)
         try Files.save(Files.child(company.url, "snapshot.json"), "{\"asOf\": [", expected: snapshotJSON)
         m.refresh()
         try check(m.company.snapshot == nil && m.company.snapshotIssue?.contains("snapshot.json") == true, "快照格式错误时提示，不中断")
@@ -166,6 +194,7 @@ import AppKit
         try check(m.company.lakehouse?.thesis == "Theses/popmart-thesis.md" && m.lakehouseKey("Theses/a.md").hasSuffix("Theses/a.md"), "读取同步目标")
 
         // Category tags name the company pages, not borrowed topic kinds.
+        try check(CompanyPage.cruxes.category.label == "Inquiries", "关键问题页沿用 Inquiries")
         try check(CompanyPage.scenarios.category.label == "Scenarios" && CompanyPage.snapshot.category.label == "Snapshot" &&
                   CompanyPage.checklist.category.label == "Red Flags" && m.companyAccent(for: .judgments)?.label == "Judgment", "页面分类标签")
 

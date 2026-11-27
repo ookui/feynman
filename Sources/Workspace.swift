@@ -440,7 +440,7 @@ enum Dialog: Identifiable {
             }
         }.sorted().joined(separator: "|")
     }
-    nonisolated static let companyFiles: Set<String> = ["project.json", "research.json", "snapshot.json", "checklist.json", "scenarios.json", "lakehouse.json", "log.md", "preflight.done"]
+    nonisolated static let companyFiles: Set<String> = ["project.json", "research.json", "snapshot.json", "checklist.json", "scenarios.json", "lakehouse.json", "checklist-review.json", "log.md", "preflight.done"]
     static func isMarkdown(_ url: URL) -> Bool { ["md", "markdown", "mdown"].contains(url.pathExtension.lowercased()) }
 
     func documentURL(_ path: String) throws -> URL {

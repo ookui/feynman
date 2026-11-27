@@ -40,7 +40,8 @@ struct Panels: View {
             switch dialog {
             case .editor(let editor): EditorPanel(m:m,draft:editor)
             case .settings: SettingsPanel(m:m)
-            case .submit(let e): SubmitToTopicPanel(m: m, entry: e)
+            case .submit(let e):
+                if e.kind == .questions { NewTopicQuestionPanel(m: m, question: e) } else { SubmitToTopicPanel(m: m, entry: e) }
             case .dependency(let e): DependencyPanel(m: m, question: e)
             case .aiRun(let id):
                 if let run = m.aiRun, run.id == id { AIRunPanel(m: m, run: run) }

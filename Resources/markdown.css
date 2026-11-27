@@ -1,4 +1,4 @@
-:root {color-scheme:light;--bg:#f4f4f4;--text:#383838;--surface:#eaeaea;--panel:#fafafa;--border:#c7cad0;--muted:#60656d;--selection:#84afe9;--accent:#596f86;--link:#395988;--font-size:15px;--content-width:820px}
+:root {color-scheme:light;--bg:#f4f4f4;--text:#383838;--surface:#eaeaea;--panel:#fafafa;--border:#c7cad0;--muted:#60656d;--selection:#84afe9;--accent:#596f86;--link:#395988;--font-size:14px;--line-height:1.7;--h1-size:1.6em;--h2-size:1.3em;--h3-size:1.12em;--h4-size:1.04em;--content-width:820px}
 html,body,#editor{height:100%;margin:0}dialog{font:14px -apple-system,sans-serif;border:1px solid #bbb;border-radius:8px}dialog input{min-width:220px}dialog button{margin:5px}.sima-image-source{color:#25272a;background:#fff;appearance:none}.sima-document table{font-size:.9em}
 
 .sima-editor ::highlight(sima-drag){background-color:#b0cdef}

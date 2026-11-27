@@ -126,7 +126,7 @@ struct ProjectDetail: View {
             if let entry { entryHeading(entry) }
             else { PageHeading(title: documentLabel(path), category: PageCategory(document: path)) { documentActions(path, body) } }
             if let entry, p.info.stock != nil {
-                if entry.kind == .questions { CruxPanel(m: m, question: entry).id(entry.id) }
+                if entry.kind == .questions && !m.showEntryRelations { Divider(); CruxSummaryBar(m: m, question: entry).id(entry.id) }
                 if entry.kind == .events { EventPanel(m: m, event: entry).id(entry.id) }
             }
             if let entry, p.info.stock == nil, entry.kind == .entities, let stock = m.stock(for: entry) {
@@ -164,10 +164,11 @@ struct ProjectDetail: View {
                         if p.info.stock != nil {
                             if e.role == "crux" { Button("移出关键问题") { m.attempt { try m.updateEntry(e.id) { $0.role = ""; $0.candidate = false } } } }
                             else { Button("设为关键问题") { m.attempt { try m.updateEntry(e.id) { $0.role = "crux"; $0.candidate = false; $0.parent = "" } } } }
-                            Button("添加行业依据…") { m.dialog = .dependency(e) }
+                            Button("关联行业依据…") { m.dialog = .dependency(e) }
+                            Button("新建行业问题…") { m.dialog = .submit(e) }
                         }
                     }
-                    if p.info.stock != nil && (e.kind == .questions || e.kind == .events) {
+                    if p.info.stock != nil && e.kind == .events {
                         Button("提交到专题…") { m.dialog = .submit(e) }
                     }
                     if p.info.stock == nil { Button("引用到我的 Memo") { m.editDoc("memo.md",append:"[" + e.title + "](feynman:" + e.id + ")") } }

@@ -152,22 +152,39 @@ extension Checklist {
     }
 }
 
+/// Levels from most to least serious. `watch` is set by the user for items worth following without a full question.
 enum CheckStatus: String, CaseIterable {
-    case flag, unchecked, ok, na
+    case flag, watch, unchecked, ok, na
     var label: String {
-        switch self { case .flag: return "异常"; case .unchecked: return "未核查"; case .ok: return "正常"; case .na: return "不适用" }
+        switch self {
+        case .flag: return "异常"; case .watch: return "关注"; case .unchecked: return "未核查"; case .ok: return "正常"; case .na: return "不适用"
+        }
     }
     var symbol: String {
-        switch self { case .flag: return "exclamationmark.triangle.fill"; case .unchecked: return "questionmark.circle"; case .ok: return "checkmark.circle"; case .na: return "minus.circle" }
+        switch self {
+        case .flag: return "exclamationmark.triangle.fill"; case .watch: return "eye.circle"; case .unchecked: return "questionmark.circle"
+        case .ok: return "checkmark.circle"; case .na: return "minus.circle"
+        }
     }
     var color: Color {
         switch self {
-        case .flag: return Color(red: 0.80, green: 0.35, blue: 0.05)
-        case .unchecked: return Color(red: 0.55, green: 0.45, blue: 0.10)
+        case .flag: return Color(red: 0.80, green: 0.30, blue: 0.10)
+        case .watch: return Color(red: 0.78, green: 0.52, blue: 0.05)
+        case .unchecked: return Color(red: 0.45, green: 0.45, blue: 0.50)
         case .ok: return Color(red: 0.12, green: 0.52, blue: 0.33)
         case .na: return .secondary
         }
     }
+}
+
+/// The user's own grading of checklist items. The AI writes checklist.json; this file is kept by the app.
+struct ChecklistReview: Codable, Equatable {
+    struct Decision: Codable, Equatable {
+        var status: String
+        var note = ""
+        var date = ""
+    }
+    var items: [String: Decision] = [:]
 }
 
 struct Checklist: Codable, Equatable {
@@ -342,7 +359,8 @@ enum CompanyPage: String, CaseIterable {
         case .reports: return "doc.text"
         }
     }
-    var category: PageCategory { .company(self) }
+    /// Key questions are inquiries like any other; the other pages have their own tags.
+    var category: PageCategory { self == .cruxes ? .kind(.questions) : .company(self) }
     var englishLabel: String {
         switch self {
         case .cruxes: return "Key Questions"
@@ -390,6 +408,7 @@ struct DependencyState: Equatable, Identifiable {
     var title: String
     var fingerprint: String
     var resolvedID: String
+    var kind: Kind? = nil
     var id: String { dependency.project + "/" + dependency.entry }
 }
 
@@ -402,6 +421,8 @@ struct CompanyState {
     var scenariosRaw: String?
     var scenariosIssue: String?
     var lakehouse: LakehouseLink?
+    var review = ChecklistReview()
+    var reviewRaw: String?
     var dependencies: [String: [DependencyState]] = [:]
     var changedDependencies: Int { dependencies.values.flatMap { $0 }.filter { $0.status != .current }.count }
 }
@@ -427,6 +448,8 @@ enum CompanyFiles {
         let (book, raw, issue) = read(ScenarioBook.self, "scenarios.json", in: company)
         state.scenarios = book ?? ScenarioBook(); state.scenariosRaw = raw; state.scenariosIssue = issue
         state.lakehouse = read(LakehouseLink.self, "lakehouse.json", in: company).0
+        let (review, reviewRaw, _) = read(ChecklistReview.self, "checklist-review.json", in: company)
+        state.review = review ?? ChecklistReview(); state.reviewRaw = reviewRaw
         state.dependencies = dependencies(in: snapshot, topics: topics)
         return state
     }
@@ -448,7 +471,7 @@ enum CompanyFiles {
                 }
                 let mark = fingerprint(found)
                 return DependencyState(dependency: dependency, status: mark == dependency.seen ? .current : .changed,
-                                       topic: topic.info.title, title: found.title, fingerprint: mark, resolvedID: found.id)
+                                       topic: topic.info.title, title: found.title, fingerprint: mark, resolvedID: found.id, kind: found.kind)
             }
         }
         return result
@@ -558,6 +581,41 @@ extension Workspace {
         return components.url?.absoluteString ?? ""
     }
 
+    /// Topics this company belongs to: each linked topic that still holds the company's entity.
+    func linkedTopics() -> [(topic: ProjectAt, entityID: String)] {
+        guard let stock = project?.info.stock else { return [] }
+        return stock.links.compactMap { link in
+            guard let topic = projects.first(where: { $0.id == link.projectID }) else { return nil }
+            return (topic, link.entityID)
+        }
+    }
+
+    /// Opens an empty question in a linked topic, related to the company's entity there, and makes the company question rely on it.
+    /// The body stays empty: the user carries over whatever is worth reusing.
+    @discardableResult
+    func newTopicQuestion(for question: Entry, topic: ProjectAt, title: String) throws -> Entry {
+        guard let company = project, let stock = company.info.stock else { throw Failure("请在个股项目中新建。") }
+        guard question.kind == .questions else { throw Failure("只能从问题新建行业问题。") }
+        guard !title.clean.isEmpty else { throw Failure("请填写行业问题的标题。") }
+        guard stock.links.contains(where: { $0.projectID == topic.id }) else { throw Failure("本公司没有关联这个专题。") }
+        guard let entity = try companyEntity(in: topic) else {
+            throw Failure("专题「" + topic.info.title + "」中找不到本公司的实体，请先在专题中恢复或重新关联。")
+        }
+        var created = Entry(kind: .questions, title: title.clean, origin: "个股提交")
+        created.links = [entity.id]
+        try Files.write(created, in: topic.url)
+        try addDependency(to: question.id, topic: topic, entry: created)
+        return created
+    }
+
+    /// The company's entity in a linked topic, following merges; nil when the topic is not linked or the entity is gone.
+    func companyEntity(in topic: ProjectAt) throws -> Entry? {
+        guard let link = project?.info.stock?.links.first(where: { $0.projectID == topic.id }) else { return nil }
+        guard let entity = try Files.scan(topic.url, indexSources: false).resolve(link.entityID),
+              entity.kind == .entities, !entity.deleted else { return nil }
+        return entity
+    }
+
     /// Writes an industry-level finding into a topic and makes the company question rely on it.
     @discardableResult
     func submitToTopic(_ item: Entry, topic: ProjectAt, title: String) throws -> Entry {
@@ -570,9 +628,60 @@ extension Workspace {
         var copy = Entry(kind: live.kind, title: title.clean.isEmpty ? live.title : title.clean,
                          body: live.body.clean + "\n\n> 来源：[" + safeTitle + "](<" + link + ">)\n", origin: "个股提交")
         copy.date = live.kind == .events ? live.date : ""
+        if let entity = try companyEntity(in: topic) { copy.links = [entity.id] }
         try Files.write(copy, in: topic.url)
         if live.kind == .questions { try addDependency(to: live.id, topic: topic, entry: copy) }
         return copy
+    }
+
+    var checklistItems: [Checklist.Item] { company.checklist?.items ?? [] }
+    /// The user's grade when there is one, otherwise the AI's.
+    func checkStatus(_ item: Checklist.Item) -> CheckStatus {
+        company.review.items[item.id].flatMap { CheckStatus(rawValue: $0.status) } ?? item.state
+    }
+    func checkDecision(_ item: Checklist.Item) -> ChecklistReview.Decision? { company.review.items[item.id] }
+    func flagQuestions(for item: Checklist.Item) -> [Entry] {
+        let linked = item.question.text
+        return snapshot.entries.filter { $0.kind == .questions && ($0.check == item.id || (!linked.isEmpty && $0.id == linked)) }
+    }
+
+    private func saveReview(_ change: (inout ChecklistReview) -> Void) throws {
+        guard let company = project, company.info.stock != nil else { throw Failure("请先打开个股项目。") }
+        var review = self.company.review
+        change(&review)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        let text = String(decoding: try encoder.encode(review), as: UTF8.self) + "\n"
+        try Files.save(Files.child(company.url, "checklist-review.json"), text, expected: self.company.reviewRaw)
+        self.company.review = review
+        self.company.reviewRaw = text
+    }
+
+    /// Sets the user's level for an item. Lowering an item to 正常 or 不适用 also closes its open questions.
+    func setCheck(_ item: Checklist.Item, to status: CheckStatus) throws {
+        let note = checkDecision(item)?.note ?? ""
+        try saveReview { $0.items[item.id] = .init(status: status.rawValue, note: note, date: Date().formatted(.iso8601.year().month().day())) }
+        if status == .ok || status == .na {
+            for question in flagQuestions(for: item) where !question.answered { try updateEntry(question.id) { $0.answered = true } }
+        }
+        revision += 1
+    }
+    func noteCheck(_ item: Checklist.Item, note: String) throws {
+        let status = checkDecision(item)?.status ?? checkStatus(item).rawValue
+        try saveReview { $0.items[item.id] = .init(status: status, note: note.clean, date: Date().formatted(.iso8601.year().month().day())) }
+        revision += 1
+    }
+    func resetCheck(_ item: Checklist.Item) throws {
+        try saveReview { $0.items.removeValue(forKey: item.id) }
+        revision += 1
+    }
+    /// Raises the item to 异常 and opens its question, creating one when there is none.
+    func upgradeCheck(_ item: Checklist.Item) throws {
+        if checkStatus(item) != .flag { try saveReview { $0.items[item.id] = .init(status: CheckStatus.flag.rawValue, note: checkDecision(item)?.note ?? "", date: Date().formatted(.iso8601.year().month().day())) } }
+        if let existing = flagQuestions(for: item).first {
+            if existing.answered { try updateEntry(existing.id) { $0.answered = false } }
+            go(.entry(existing.id))
+        } else { try createFlagQuestion(item) }
     }
 
     func createFlagQuestion(_ item: Checklist.Item) throws {
@@ -581,9 +690,10 @@ extension Workspace {
         question.check = item.id
         let links = (item.evidence ?? []).compactMap { link -> String? in
             guard !link.url.text.isEmpty else { return nil }
-            return "- [" + (link.title.text.isEmpty ? link.url.text : link.title.text) + "](" + link.url.text + ")" + (link.date.text.isEmpty ? "" : "，" + link.date.text)
+            return "[" + (link.title.text.isEmpty ? link.url.text : link.title.text) + "](" + link.url.text + ")" + (link.date.text.isEmpty ? "" : "（" + link.date.text + "）")
         }
-        question.body = item.finding.text + (links.isEmpty ? "" : "\n\n## 证据\n\n" + links.joined(separator: "\n")) + "\n"
+        // A starting paragraph for the user's own research; the sources follow the finding, not a fixed section.
+        question.body = item.finding.text + (links.isEmpty ? "" : "\n\n出处：" + links.joined(separator: "；") + "。") + "\n"
         try store(question)
         go(.entry(question.id))
     }

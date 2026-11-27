@@ -7,6 +7,8 @@ private enum RelationLabel {
 
 enum RelationTarget: Hashable {
     case entry(String), quote(Anchor), asset(String), document(String)
+    /// A company question's industry basis: an entry in another (topic) project.
+    case topic(project: String, entry: String)
 }
 
 struct RelationMenu: View {
@@ -33,6 +35,10 @@ struct RelationMenu: View {
         case .asset(let path):
             Button("解除资料关联") { model.attempt { try model.removeSourceRelation(.asset(path), from: entry.id) } }
             if path.hasPrefix("library:") { Button("查看反链") { model.dialog = .backlinks(path) } }
+        case .topic(let project, let id):
+            if let state = model.company.dependencies[entry.id]?.first(where: { $0.dependency.project == project && $0.dependency.entry == id }) {
+                Button("移除这条行业依据") { model.attempt { try model.removeDependency(state.dependency, from: entry.id) } }
+            }
         }
     }
 }
@@ -43,7 +49,35 @@ private struct RelationNode: Identifiable {
     var typeLabel: String
     var detail: String
     var icon: RelationIcon
+    /// Comes from an industry topic rather than this project.
+    var industry = false
     var id: RelationTarget { target }
+}
+
+/// Marks what comes from an industry topic: the topic colour, used for the tag, the ring and the branch.
+private enum IndustryMark {
+    static var color: Color { PageCategory.project.color }
+    static let label = "行业依据"
+}
+
+private struct IndustryTag: View {
+    var body: some View {
+        Text(IndustryMark.label).font(.system(size: 9, weight: .semibold)).foregroundStyle(.white)
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(IndustryMark.color, in: RoundedRectangle(cornerRadius: 3))
+            .fixedSize()
+    }
+}
+
+/// The type line of a node: the industry tag first when it comes from a topic.
+private struct NodeTypeLine: View {
+    let node: RelationNode
+    var body: some View {
+        HStack(spacing: 4) {
+            if node.industry { IndustryTag() }
+            Text(node.typeLabel).font(.system(size: 10, weight: .medium)).foregroundStyle(node.icon.color)
+        }
+    }
 }
 
 struct EntryRelations: View {
@@ -101,6 +135,16 @@ struct EntryRelations: View {
                                        typeLabel: typeLabel, detail: typeLabel,
                                        icon: icon))
         }
+        // Industry basis last, so the nodes sit together on one arc of the graph.
+        if entry.kind == .questions, model.project?.info.stock != nil {
+            for state in model.company.dependencies[entry.id] ?? [] {
+                let kind = state.kind ?? .questions
+                let status = state.status == .changed ? " · 已更新" : state.status == .missing ? " · 已移走" : ""
+                result.append(RelationNode(target: .topic(project: state.dependency.project, entry: state.dependency.entry), title: state.title,
+                                           typeLabel: kind.englishLabel, detail: "专题「" + state.topic + "」" + status,
+                                           icon: RelationIcon(kind), industry: true))
+            }
+        }
         return result
     }
 
@@ -108,6 +152,10 @@ struct EntryRelations: View {
         switch target {
         case .entry(let id): model.go(.entry(id))
         case .document(let path): model.go(.doc(path))
+        case .topic(let project, let id):
+            if let state = model.company.dependencies[entry.id]?.first(where: { $0.dependency.project == project && $0.dependency.entry == id }),
+               state.status != .missing { model.openDependency(state) }
+            else { model.error = "这条行业依据已移走或删除。" }
         case .quote(let anchor):
             if model.valid(.doc(anchor.report)) { model.go(.doc(anchor.report), anchor: anchor) }
             else { model.error = "出处文件尚未同步或已移走。" }
@@ -142,6 +190,7 @@ struct EntryRelations: View {
             } else {
                 network(items)
             }
+            if items.contains(where: \.industry) { IndustryLegend() }
         }.onChange(of: entry.id) { _, _ in hovered = nil; enlarged = false }
     }
 
@@ -185,18 +234,21 @@ struct EntryRelations: View {
     private func nodeButton(_ node: RelationNode, lines: Int?) -> some View {
         Button { open(node.target) } label: {
             HStack(spacing: 8) {
-                RelationEmblem(icon: node.icon, size: 27)
+                RelationEmblem(icon: node.icon, size: 27).overlay { if node.industry { IndustryRing(size: 27) } }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(node.title).font(.system(size: 12, weight: .medium)).foregroundStyle(ink).lineLimit(lines)
-                    Text(node.detail).font(.system(size: 10)).foregroundStyle(node.icon.color).lineLimit(1)
+                    HStack(spacing: 4) {
+                        if node.industry { IndustryTag() }
+                        Text(node.detail).font(.system(size: 10)).foregroundStyle(node.industry ? IndustryMark.color : node.icon.color).lineLimit(1)
+                    }
                 }.multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
             }.padding(.horizontal, 8).padding(.vertical, 4)
                 .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
                 .contentShape(Rectangle())
         }.buttonStyle(SidebarLinkStyle(horizontalInset: 0, verticalInset: 0))
-        .background(Color.white.opacity(0.87), in: RoundedRectangle(cornerRadius: 7))
-        .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(Color.gray.opacity(0.24)).allowsHitTesting(false) }
+        .background(node.industry ? IndustryMark.color.opacity(0.06) : Color.white.opacity(0.87), in: RoundedRectangle(cornerRadius: 7))
+        .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(node.industry ? IndustryMark.color.opacity(0.45) : Color.gray.opacity(0.24)).allowsHitTesting(false) }
         .help(node.title + "\n" + node.detail)
         .contextMenu { RelationMenu(model: model, entry: entry, target: node.target) }
     }
@@ -236,6 +288,12 @@ struct EntryRelations: View {
                             for (i, point) in layout.points.enumerated() {
                                 let path = layout.branch(to: point)
                                 let highlighted = selected == i
+                                if items[i].industry {
+                                    // From a topic: dashed, in the topic colour.
+                                    context.stroke(path, with: .color(IndustryMark.color.opacity(highlighted ? 0.95 : 0.6)),
+                                                   style: StrokeStyle(lineWidth: highlighted ? 1.8 : 1.3, dash: [5, 3]))
+                                    continue
+                                }
                                 let stroke = highlighted ? items[i].icon.color : Color(.sRGB, white: selected == nil ? 0.78 : 0.86, opacity: 1)
                                 context.stroke(path, with: .color(stroke), lineWidth: highlighted ? 1.8 : 1.1)
                             }
@@ -290,8 +348,9 @@ struct EntryRelations: View {
     private func orbitNode(_ node: RelationNode, left: Bool, labelWidth: CGFloat) -> some View {
         let active = hovered == node.id
         let dot = RelationEmblem(icon: node.icon, size: RelationEmblem.nodeSize)
+            .overlay { if node.industry { IndustryRing(size: RelationEmblem.nodeSize) } }
         let label = VStack(alignment: left ? .trailing : .leading, spacing: 2) {
-            Text(node.typeLabel).font(.system(size: 10, weight: .medium)).foregroundStyle(node.icon.color)
+            NodeTypeLine(node: node)
             Text(node.title).font(.system(size: 13, weight: active ? .semibold : .medium))
                 .foregroundStyle(ink).lineLimit(2)
                 .multilineTextAlignment(left ? .trailing : .leading)
@@ -400,5 +459,32 @@ private struct RelationLayout {
             path.addQuadCurve(to: point, control: CGPoint(x: center.x, y: point.y))
         }
         return path
+    }
+}
+
+private struct IndustryRing: View {
+    let size: CGFloat
+    var body: some View {
+        RoundedRectangle(cornerRadius: (size + 6) * 0.28, style: .continuous)
+            .strokeBorder(IndustryMark.color, lineWidth: 1.5)
+            .frame(width: size + 6, height: size + 6)
+            .allowsHitTesting(false)
+    }
+}
+
+/// Explains the two kinds of branch once the graph mixes them.
+private struct IndustryLegend: View {
+    var body: some View {
+        HStack(spacing: 14) {
+            HStack(spacing: 5) {
+                Capsule().fill(Color(white: 0.72)).frame(width: 18, height: 1.5)
+                Text("本项目条目")
+            }
+            HStack(spacing: 5) {
+                Path { p in p.move(to: CGPoint(x: 0, y: 1)); p.addLine(to: CGPoint(x: 18, y: 1)) }
+                    .stroke(IndustryMark.color, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3])).frame(width: 18, height: 2)
+                Text("来自行业专题")
+            }
+        }.font(.system(size: 10)).foregroundStyle(.secondary).accessibilityElement(children: .combine)
     }
 }

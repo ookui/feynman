@@ -101,6 +101,7 @@ struct MainView: View {
     @State private var historyKeyMonitor: Any?
     @AppStorage("outlineWidth") private var outlineWidth = 236.0
     @AppStorage("relationsWidth") private var relationsWidth = 0.0
+    @AppStorage("judgmentWidth") private var judgmentWidth = 380.0
     let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     var body: some View {
         GeometryReader { geometry in
@@ -134,7 +135,7 @@ struct MainView: View {
                     if let p = model.project {
                         Button { model.copyEvidence(model.displayedEntry?.title ?? model.currentNotePath.map(documentLabel) ?? p.info.title, target: model.place.key) } label: { Image(systemName:"link") }.help("复制此页的 Markdown 研究链接")
                         Button { NSWorkspace.shared.activateFileViewerSelecting([p.url]) } label: { Image(systemName:"folder") }.help("在 Finder 中显示项目")
-                        Button { if model.displayedEntry != nil { model.showEntryRelations.toggle() } else { model.inspect.toggle() } } label: { Image(systemName:"sidebar.right") }.help("显示关联与出处")
+                        Button { if model.displayedEntry != nil { model.showEntryRelations.toggle() } else { model.inspect.toggle() } } label: { Image(systemName:"sidebar.right") }.help(model.isCompany && model.displayedEntry?.kind == .questions ? "显示判断栏与关系图" : "显示关联与出处")
                     }
                     Button { model.dialog = .settings } label: { Label("AI 设置", systemImage:"gearshape").labelStyle(.titleAndIcon) }.buttonStyle(.borderless).fixedSize().help("设置 AI 研究服务与 CLI 路径")
                 }.buttonStyle(ToolbarIconStyle()).foregroundStyle(leaf).padding(.horizontal,14).frame(height:48)
@@ -145,7 +146,15 @@ struct MainView: View {
                         Group {
                             if let p = model.project { ProjectDetail(m:model,p:p) } else { LibraryView(m:model) }
                         }.frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
-                        if model.showEntryRelations, let entry = model.displayedEntry, model.project != nil {
+                        if model.showEntryRelations, let entry = model.displayedEntry, model.project != nil,
+                           model.isCompany && entry.kind == .questions {
+                            // A company question keeps the body wide: the judgment pane has its own, narrower width.
+                            let judgment = max(300, min(judgmentWidth, maxRelations))
+                            PaneDivider(label: "判断栏宽度", width: judgment, direction: -1) {
+                                judgmentWidth = max(300, min($0, maxRelations))
+                            }
+                            CompanyQuestionPane(m: model, entry: entry, graphWidth: judgment - 32).frame(width: judgment)
+                        } else if model.showEntryRelations, let entry = model.displayedEntry, model.project != nil {
                             PaneDivider(label: "关系图宽度", width: relations, direction: -1) {
                                 relationsWidth = max(220, min($0, maxRelations))
                             }
